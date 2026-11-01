@@ -49,7 +49,11 @@ export default function Auth() {
         if (signInError) throw signInError;
       }
     } catch (err) {
-      setError(err.message || 'Authentication failed. Please check your credentials.');
+      if (err.message?.toLowerCase().includes('rate limit')) {
+        setError('Supabase email limit reached. Tip: In Supabase Dashboard → Authentication → Providers → Email, toggle OFF "Confirm email" to enable instant sign-up without email confirmation!');
+      } else {
+        setError(err.message || 'Authentication failed. Please check your credentials.');
+      }
     } finally {
       setLoading(false);
     }
@@ -301,4 +305,3 @@ const authStyles = {
     textDecoration: 'underline',
   },
 };
-
