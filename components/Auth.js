@@ -136,11 +136,11 @@ export default function Auth() {
 
         <button
           type="submit"
-          disabled={loading || !isSupabaseConfigured}
+          disabled={loading}
           style={{
             ...authStyles.submitBtn,
-            opacity: loading || !isSupabaseConfigured ? 0.7 : 1,
-            cursor: loading || !isSupabaseConfigured ? 'not-allowed' : 'pointer',
+            opacity: loading ? 0.7 : 1,
+            cursor: loading ? 'not-allowed' : 'pointer',
           }}
         >
           {loading
