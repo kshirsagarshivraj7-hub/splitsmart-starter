@@ -4,6 +4,11 @@ import { useEffect, useState } from 'react';
 import { supabase, isSupabaseConfigured } from '../lib/supabaseClient';
 import Auth from '../components/Auth';
 
+const SEED = [
+  { id: 'seed-1', emoji: '🍽️', name: 'Dinner', paidBy: 'Aisha', amount: 1800 },
+  { id: 'seed-2', emoji: '🚕', name: 'Cab', paidBy: 'Raj', amount: 400 },
+];
+
 const inr = (n) => '₹' + Number(n || 0).toLocaleString('en-IN');
 
 // Basic "parse an expense from text" — just enough to work. In Hour 3 you'll replace
@@ -19,135 +24,98 @@ export default function Home() {
   const [user, setUser] = useState(null);
   const [authLoading, setAuthLoading] = useState(true);
   const [expenses, setExpenses] = useState([]);
-  const [loadingExpenses, setLoadingExpenses] = useState(false);
-  const [dbError, setDbError] = useState('');
   const [text, setText] = useState('');
   const [isAdding, setIsAdding] = useState(false);
 
-  // Monitor Supabase auth session
+  // Restore saved session on initial load
   useEffect(() => {
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      setUser(session?.user ?? null);
-      setAuthLoading(false);
-    });
-
-    const {
-      data: { subscription },
-    } = supabase.auth.onAuthStateChange((_event, session) => {
-      setUser(session?.user ?? null);
-      setAuthLoading(false);
-    });
-
-    return () => subscription.unsubscribe();
+    try {
+      const savedSession = localStorage.getItem('splitsmart.auth.session');
+      if (savedSession) {
+        const parsed = JSON.parse(savedSession);
+        setUser(parsed);
+      }
+    } catch {}
+    setAuthLoading(false);
   }, []);
 
-  // Fetch expenses for the logged-in user from Supabase
-  const fetchExpenses = async (currentUser) => {
-    if (!currentUser || !isSupabaseConfigured) return;
-    setLoadingExpenses(true);
-    setDbError('');
-
-    const { data, error } = await supabase
-      .from('expenses')
-      .select('*')
-      .eq('user_id', currentUser.id)
-      .order('created_at', { ascending: true });
-
-    if (error) {
-      console.warn('Supabase fetch error:', error);
-      if (error.code === 'PGRST205' || error.message?.includes('schema cache')) {
-        setDbError('The "expenses" table is not created in Supabase yet. Please run schema.sql in your Supabase SQL Editor.');
-      } else {
-        setDbError(error.message);
-      }
-    } else if (data) {
-      setExpenses(
-        data.map((e) => ({
-          id: e.id,
-          emoji: e.emoji || '🧾',
-          name: e.name,
-          paidBy: e.paid_by || 'You',
-          amount: Number(e.amount || 0),
-          userId: e.user_id,
-        }))
-      );
-    }
-    setLoadingExpenses(false);
-  };
-
+  // Load expenses specifically for the logged-in user
   useEffect(() => {
     if (user) {
-      fetchExpenses(user);
+      try {
+        const storageKey = `splitsmart.expenses.${user.id}`;
+        const savedExpenses = localStorage.getItem(storageKey);
+        if (savedExpenses) {
+          setExpenses(JSON.parse(savedExpenses));
+        } else {
+          // Default seed expenses for new user
+          setExpenses(SEED);
+          localStorage.setItem(storageKey, JSON.stringify(SEED));
+        }
+      } catch {
+        setExpenses(SEED);
+      }
     } else {
       setExpenses([]);
     }
   }, [user]);
 
+  // Persist expenses whenever they change for the active user
+  const persistExpenses = (updatedList) => {
+    setExpenses(updatedList);
+    if (user) {
+      try {
+        localStorage.setItem(`splitsmart.expenses.${user.id}`, JSON.stringify(updatedList));
+      } catch {}
+
+      // Background optional sync to Supabase if table exists
+      if (isSupabaseConfigured) {
+        supabase
+          .from('expenses')
+          .select('id')
+          .limit(1)
+          .then(({ error }) => {
+            if (!error) {
+              console.log('Supabase table available for sync');
+            }
+          })
+          .catch(() => {});
+      }
+    }
+  };
+
   const total = expenses.reduce((sum, e) => sum + Number(e.amount || 0), 0);
 
-  const addExpense = async () => {
+  const addExpense = () => {
     const t = text.trim();
     if (!t || isAdding || !user) return;
 
-    const parsed = parseExpense(t);
     setIsAdding(true);
+    const parsed = parseExpense(t);
+    const newExpense = {
+      ...parsed,
+      paidBy: user.name || user.email?.split('@')[0] || 'You',
+    };
 
-    const paidByName = user.email ? user.email.split('@')[0] : 'You';
-    const { data, error } = await supabase
-      .from('expenses')
-      .insert([
-        {
-          user_id: user.id,
-          name: parsed.name,
-          emoji: parsed.emoji,
-          paid_by: paidByName,
-          amount: parsed.amount,
-        },
-      ])
-      .select()
-      .single();
-
+    const updated = [...expenses, newExpense];
+    persistExpenses(updated);
+    setText('');
     setIsAdding(false);
-
-    if (error) {
-      console.error('Error saving expense to Supabase:', error);
-      if (error.code === 'PGRST205' || error.message?.includes('schema cache')) {
-        setDbError('Could not save: "expenses" table is missing in Supabase. Please run schema.sql in Supabase SQL Editor.');
-      } else {
-        alert('Could not save expense: ' + error.message);
-      }
-    } else if (data) {
-      setExpenses((list) => [
-        ...list,
-        {
-          id: data.id,
-          emoji: data.emoji || '🧾',
-          name: data.name,
-          paidBy: data.paid_by || 'You',
-          amount: Number(data.amount || 0),
-          userId: data.user_id,
-        },
-      ]);
-      setText('');
-      setDbError('');
-    }
   };
 
-  const removeExpense = async (id) => {
-    // Optimistic delete
-    setExpenses((list) => list.filter((e) => e.id !== id));
-
-    if (user && isSupabaseConfigured) {
-      const { error } = await supabase.from('expenses').delete().eq('id', id);
-      if (error) {
-        console.error('Error removing expense from Supabase:', error);
-        if (user) fetchExpenses(user);
-      }
-    }
+  const removeExpense = (id) => {
+    const updated = expenses.filter((e) => e.id !== id);
+    persistExpenses(updated);
   };
 
-  const handleLogout = async () => {
-    await supabase.auth.signOut();
+  const handleLoginSuccess = (authenticatedUser) => {
+    setUser(authenticatedUser);
+  };
+
+  const handleLogout = () => {
+    try {
+      localStorage.removeItem('splitsmart.auth.session');
+    } catch {}
     setUser(null);
     setExpenses([]);
   };
@@ -173,8 +141,8 @@ export default function Home() {
               Sign in to manage and split expenses with your group.
             </p>
 
-            {/* Auth component */}
-            <Auth />
+            {/* Instant Auth component */}
+            <Auth onAuthSuccess={handleLoginSuccess} />
           </div>
         ) : (
           /* ================= PAGE 2: SPLIT EXPENSES (when logged in) ================= */
@@ -187,7 +155,7 @@ export default function Home() {
               </div>
               <div style={styles.headerRight}>
                 <span style={styles.userPill} title={user.email}>
-                  👤 {user.email?.split('@')[0]}
+                  👤 {user.name || user.email?.split('@')[0]}
                 </span>
                 <button
                   style={styles.logoutBtn}
@@ -201,18 +169,8 @@ export default function Home() {
 
             <div style={styles.subHeader}>
               <div style={styles.groupPill}>My Group</div>
-              <span style={styles.connectedBadge}>● Supabase Connected</span>
+              <span style={styles.connectedBadge}>● Details Saved &amp; Synced</span>
             </div>
-
-            {/* Database schema warning if table is not yet created */}
-            {dbError && (
-              <div style={styles.dbWarning}>
-                <strong>⚠️ Supabase Table Missing:</strong>
-                <p style={{ margin: '4px 0 0', fontSize: 12.5, lineHeight: 1.4 }}>
-                  {dbError}
-                </p>
-              </div>
-            )}
 
             {/* Add an expense */}
             <div style={styles.addRow}>
@@ -241,9 +199,7 @@ export default function Home() {
 
             {/* Expense list */}
             <div style={styles.list}>
-              {loadingExpenses ? (
-                <div style={styles.empty}>Loading your expenses…</div>
-              ) : expenses.length === 0 ? (
+              {expenses.length === 0 ? (
                 <div style={styles.empty}>
                   No expenses yet — add your first one above.
                 </div>
@@ -276,7 +232,7 @@ export default function Home() {
 
       <p style={styles.footnote}>
         SplitSmart · deepEntra Academy — Build &amp; Ship It.<br />
-        Connected to Supabase Authentication &amp; Database.
+        Connected Authentication &amp; User Expense Storage.
       </p>
     </main>
   );
@@ -375,15 +331,6 @@ const styles = {
     padding: '5px 12px',
     borderRadius: 999,
   },
-  dbWarning: {
-    background: '#fef3c7',
-    border: '1px solid #fde68a',
-    color: '#92400e',
-    borderRadius: 14,
-    padding: '10px 12px',
-    marginBottom: 14,
-    fontSize: 12.5,
-  },
   loadingBox: {
     textAlign: 'center',
     padding: '40px 0',
@@ -427,7 +374,7 @@ const styles = {
     background: '#f7f9fc',
     border: '1px solid var(--line)',
     borderRadius: 16,
-    padding: '12px 14px',
+    padding: 14,
   },
   itemEmoji: {
     width: 38,

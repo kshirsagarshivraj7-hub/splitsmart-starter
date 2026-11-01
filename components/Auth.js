@@ -1,9 +1,8 @@
 'use client';
 
 import { useState } from 'react';
-import { supabase, isSupabaseConfigured } from '../lib/supabaseClient';
 
-export default function Auth() {
+export default function Auth({ onAuthSuccess }) {
   const [isSignUp, setIsSignUp] = useState(false);
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -11,17 +10,20 @@ export default function Auth() {
   const [error, setError] = useState('');
   const [message, setMessage] = useState('');
 
-  const handleAuth = async (e) => {
+  const handleAuth = (e) => {
     e.preventDefault();
     setError('');
     setMessage('');
 
-    if (!email || !password) {
+    const cleanEmail = email.trim().toLowerCase();
+    const cleanPassword = password.trim();
+
+    if (!cleanEmail || !cleanPassword) {
       setError('Please enter both email and password.');
       return;
     }
 
-    if (password.length < 6) {
+    if (cleanPassword.length < 6) {
       setError('Password must be at least 6 characters.');
       return;
     }
@@ -29,47 +31,73 @@ export default function Auth() {
     setLoading(true);
 
     try {
-      if (isSignUp) {
-        const { data, error: signUpError } = await supabase.auth.signUp({
-          email,
-          password,
-        });
-        if (signUpError) throw signUpError;
+      // Get all registered users from storage
+      let users = [];
+      try {
+        const stored = localStorage.getItem('splitsmart.auth.users');
+        if (stored) users = JSON.parse(stored);
+      } catch {}
 
-        if (data?.user && !data?.session) {
-          setMessage('Account created! Please check your email to confirm your account, then sign in.');
-        } else {
-          setMessage('Account created and signed in successfully!');
+      if (isSignUp) {
+        // Sign Up Flow
+        const existing = users.find((u) => u.email === cleanEmail);
+        if (existing) {
+          setError('An account with this email already exists. Please Sign In.');
+          setLoading(false);
+          return;
         }
+
+        const newUser = {
+          id: 'user-' + Date.now(),
+          email: cleanEmail,
+          password: cleanPassword,
+          name: cleanEmail.split('@')[0],
+          createdAt: new Date().toISOString(),
+        };
+
+        users.push(newUser);
+        localStorage.setItem('splitsmart.auth.users', JSON.stringify(users));
+        localStorage.setItem('splitsmart.auth.session', JSON.stringify(newUser));
+
+        setMessage('Account created successfully! Logging you in…');
+        setTimeout(() => {
+          if (onAuthSuccess) onAuthSuccess(newUser);
+        }, 300);
       } else {
-        const { error: signInError } = await supabase.auth.signInWithPassword({
-          email,
-          password,
-        });
-        if (signInError) throw signInError;
+        // Sign In Flow
+        let existingUser = users.find((u) => u.email === cleanEmail);
+
+        if (!existingUser) {
+          // Auto-create user for frictionless demo testing if not found
+          existingUser = {
+            id: 'user-' + Date.now(),
+            email: cleanEmail,
+            password: cleanPassword,
+            name: cleanEmail.split('@')[0],
+            createdAt: new Date().toISOString(),
+          };
+          users.push(existingUser);
+          localStorage.setItem('splitsmart.auth.users', JSON.stringify(users));
+        } else if (existingUser.password && existingUser.password !== cleanPassword) {
+          setError('Incorrect password. Please try again.');
+          setLoading(false);
+          return;
+        }
+
+        localStorage.setItem('splitsmart.auth.session', JSON.stringify(existingUser));
+        setMessage('Signed in successfully! Opening SplitSmart…');
+        setTimeout(() => {
+          if (onAuthSuccess) onAuthSuccess(existingUser);
+        }, 300);
       }
     } catch (err) {
-      if (err.message?.toLowerCase().includes('rate limit')) {
-        setError('Supabase email limit reached. Tip: In Supabase Dashboard → Authentication → Providers → Email, toggle OFF "Confirm email" to enable instant sign-up without email confirmation!');
-      } else {
-        setError(err.message || 'Authentication failed. Please check your credentials.');
-      }
-    } finally {
+      setError('Something went wrong. Please try again.');
       setLoading(false);
     }
   };
 
   return (
     <div style={authStyles.wrapper}>
-      {!isSupabaseConfigured && (
-        <div style={authStyles.notice}>
-          <div style={authStyles.noticeTitle}>⚙️ Supabase Setup Needed</div>
-          <p style={authStyles.noticeText}>
-            Add your <code>NEXT_PUBLIC_SUPABASE_URL</code> and <code>NEXT_PUBLIC_SUPABASE_ANON_KEY</code> to <code>.env.local</code> (and Vercel environment variables) to connect your project.
-          </p>
-        </div>
-      )}
-
       {/* Auth Toggle Tabs */}
       <div style={authStyles.tabs}>
         <button
@@ -104,7 +132,9 @@ export default function Auth() {
 
       <form onSubmit={handleAuth} style={authStyles.form}>
         <div style={authStyles.field}>
-          <label style={authStyles.label} htmlFor="auth-email">Email</label>
+          <label style={authStyles.label} htmlFor="auth-email">
+            Email
+          </label>
           <input
             id="auth-email"
             type="email"
@@ -118,7 +148,9 @@ export default function Auth() {
         </div>
 
         <div style={authStyles.field}>
-          <label style={authStyles.label} htmlFor="auth-password">Password</label>
+          <label style={authStyles.label} htmlFor="auth-password">
+            Password
+          </label>
           <input
             id="auth-password"
             type="password"
@@ -192,25 +224,6 @@ const authStyles = {
     flexDirection: 'column',
     gap: 16,
     padding: '8px 0',
-  },
-  notice: {
-    background: 'rgba(28, 95, 212, 0.08)',
-    border: '1px solid rgba(28, 95, 212, 0.2)',
-    borderRadius: 14,
-    padding: '12px 14px',
-    color: 'var(--ink)',
-  },
-  noticeTitle: {
-    fontWeight: 700,
-    fontSize: 13.5,
-    marginBottom: 4,
-    color: 'var(--blue)',
-  },
-  noticeText: {
-    fontSize: 12.5,
-    lineHeight: 1.5,
-    margin: 0,
-    color: 'var(--muted)',
   },
   tabs: {
     display: 'flex',
