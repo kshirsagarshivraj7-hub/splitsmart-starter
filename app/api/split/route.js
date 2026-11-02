@@ -8,10 +8,11 @@ export async function POST(req) {
     }
 
     const apiKey = process.env.GEMINI_API_KEY;
+
     if (apiKey) {
       try {
         const response = await fetch(
-          `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`,
+          `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent?key=${apiKey}`,
           {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -29,17 +30,24 @@ export async function POST(req) {
             }),
           }
         );
-        const json = await response.json();
-        const textResponse = json.candidates?.[0]?.content?.parts?.[0]?.text;
-        if (textResponse) {
-          const parsed = JSON.parse(textResponse);
-          return NextResponse.json({
-            description: parsed.description || sentence,
-            amount: Number(parsed.amount || 0),
-          });
+
+        if (response.ok) {
+          const json = await response.json();
+          const textResponse = json.candidates?.[0]?.content?.parts?.[0]?.text;
+          if (textResponse) {
+            const cleanJson = textResponse
+              .replace(/```json/gi, '')
+              .replace(/```/g, '')
+              .trim();
+            const parsed = JSON.parse(cleanJson);
+            return NextResponse.json({
+              description: parsed.description || sentence,
+              amount: Number(parsed.amount || 0),
+            });
+          }
         }
       } catch (err) {
-        console.warn('Gemini AI fallback:', err.message);
+        console.warn('Gemini AI parse error, using fallback:', err.message);
       }
     }
 
@@ -58,4 +66,3 @@ export async function POST(req) {
     return NextResponse.json({ error: error.message }, { status: 500 });
   }
 }
-
