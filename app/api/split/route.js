@@ -21,7 +21,7 @@ export async function POST(req) {
                 {
                   parts: [
                     {
-                      text: `Extract the expense description and numeric amount from this text: "${sentence}". Respond with JSON only: {"description": "...", "amount": number}.`,
+                      text: `Extract the expense description, numeric amount, and optional payer name (paid_by) from this text: "${sentence}". If no person is explicitly mentioned as paying, set paid_by to null. Respond with JSON only: {"description": "...", "amount": number, "paid_by": "..." or null}.`,
                     },
                   ],
                 },
@@ -43,6 +43,7 @@ export async function POST(req) {
             return NextResponse.json({
               description: parsed.description || sentence,
               amount: Number(parsed.amount || 0),
+              paid_by: parsed.paid_by || null,
             });
           }
         }
@@ -54,13 +55,28 @@ export async function POST(req) {
     // Fallback: rule-based parser
     const amountMatch = sentence.match(/\d[\d,]*(\.\d+)?/);
     const amount = amountMatch ? Number(amountMatch[0].replace(/,/g, '')) : 0;
+
+    let paid_by = null;
+    const paidByMatch = sentence.match(/paid\s+by\s+([A-Za-z]+)/i);
+    const personPaidMatch = sentence.match(/^([A-Za-z]+)\s+paid/i);
+    if (paidByMatch) {
+      paid_by = paidByMatch[1];
+    } else if (personPaidMatch) {
+      paid_by = personPaidMatch[1];
+    }
+
     const name =
-      sentence.replace(/\d[\d,]*(\.\d+)?/, '').replace(/\s+/g, ' ').trim() ||
-      'Expense';
+      sentence
+        .replace(/paid\s+by\s+[A-Za-z]+/i, '')
+        .replace(/^[A-Za-z]+\s+paid/i, '')
+        .replace(/\d[\d,]*(\.\d+)?/, '')
+        .replace(/\s+/g, ' ')
+        .trim() || 'Expense';
 
     return NextResponse.json({
       description: name.charAt(0).toUpperCase() + name.slice(1),
       amount,
+      paid_by,
     });
   } catch (error) {
     return NextResponse.json({ error: error.message }, { status: 500 });
