@@ -16,11 +16,18 @@ export default function Home() {
   const [selectedPayer, setSelectedPayer] = useState('');
   const [showBalances, setShowBalances] = useState(true);
   const [expenses, setExpenses] = useState([]);
+
+  // Form states for adding expenses
+  const [addMode, setAddMode] = useState('form'); // 'form' or 'ai'
+  const [expenseTitle, setExpenseTitle] = useState('');
+  const [expenseAmount, setExpenseAmount] = useState('');
   const [text, setText] = useState('');
+  const [isAdding, setIsAdding] = useState(false);
+
+  // Auth states
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [authMsg, setAuthMsg] = useState('');
-  const [isAdding, setIsAdding] = useState(false);
 
   // Restore saved session on mount
   useEffect(() => {
@@ -242,6 +249,174 @@ export default function Home() {
     } catch {}
   };
 
+  // Helper to pick emoji based on expense title
+  const getEmoji = (name) => {
+    const lower = (name || '').toLowerCase();
+    if (lower.includes('dinner') || lower.includes('lunch') || lower.includes('food') || lower.includes('pizza') || lower.includes('burger') || lower.includes('biryani')) return '🍽️';
+    if (lower.includes('cab') || lower.includes('uber') || lower.includes('taxi') || lower.includes('auto') || lower.includes('petrol') || lower.includes('fuel')) return '🚕';
+    if (lower.includes('coffee') || lower.includes('tea') || lower.includes('chai') || lower.includes('cafe') || lower.includes('starbucks')) return '☕';
+    if (lower.includes('movie') || lower.includes('popcorn') || lower.includes('ticket') || lower.includes('cinema')) return '🎬';
+    if (lower.includes('grocery') || lower.includes('groceries') || lower.includes('milk') || lower.includes('market') || lower.includes('supermarket')) return '🛒';
+    if (lower.includes('hotel') || lower.includes('stay') || lower.includes('room') || lower.includes('resort')) return '🏨';
+    if (lower.includes('flight') || lower.includes('trip') || lower.includes('travel') || lower.includes('train')) return '✈️';
+    if (lower.includes('drink') || lower.includes('beer') || lower.includes('party')) return '🍻';
+    return '🧾';
+  };
+
+  // Function 1: Manual Form to add Expense, Amount, and Who Paid
+  const handleManualAddExpense = (e) => {
+    e.preventDefault();
+    const name = expenseTitle.trim();
+    const amt = parseFloat(expenseAmount);
+
+    if (!name) {
+      alert('Please enter an expense description.');
+      return;
+    }
+    if (isNaN(amt) || amt <= 0) {
+      alert('Please enter a valid amount greater than 0.');
+      return;
+    }
+    if (!groupId) {
+      alert('Please select or create a group first.');
+      return;
+    }
+
+    const payer = selectedPayer || members[0] || currentUserName;
+    const emoji = getEmoji(name);
+
+    const newExp = {
+      id: 'exp-' + Date.now(),
+      user_id: session.user.id,
+      group_id: groupId,
+      name,
+      paid_by: payer,
+      amount: amt,
+      emoji,
+      created_at: new Date().toISOString(),
+    };
+
+    try {
+      let allExp = [];
+      const stored = localStorage.getItem(`splitsmart.group_expenses.${groupId}`);
+      if (stored) allExp = JSON.parse(stored);
+      allExp.push(newExp);
+      localStorage.setItem(`splitsmart.group_expenses.${groupId}`, JSON.stringify(allExp));
+    } catch {}
+
+    // Background optional sync to Supabase
+    supabase
+      .from('expenses')
+      .insert({
+        user_id: session.user.id,
+        group_id: groupId,
+        name,
+        paid_by: payer,
+        amount: amt,
+      })
+      .catch(() => {});
+
+    setExpenses((list) => [...list, newExp]);
+    setExpenseTitle('');
+    setExpenseAmount('');
+  };
+
+  // Function 2: Quick AI / Natural text parsing
+  const handleAiAddExpense = async () => {
+    const t = text.trim();
+    if (!t || !groupId || isAdding) return;
+
+    setIsAdding(true);
+    try {
+      let expenseName = '';
+      let expenseAmt = 0;
+      let detectedPayer = null;
+
+      // Try AI parsing via /api/split
+      try {
+        const res = await fetch('/api/split', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ sentence: t }),
+        });
+        const data = await res.json();
+        if (data && (data.description || data.amount)) {
+          expenseName = data.description;
+          expenseAmt = Number(data.amount || 0);
+          detectedPayer = data.paid_by;
+        }
+      } catch {}
+
+      // Fallback regex parsing
+      if (!expenseName) {
+        const amountMatch = t.match(/\d[\d,]*(\.\d+)?/);
+        expenseAmt = amountMatch ? Number(amountMatch[0].replace(/,/g, '')) : 0;
+        const rawName = t.replace(/\d[\d,]*(\.\d+)?/, '').replace(/\s+/g, ' ').trim() || 'Expense';
+        expenseName = rawName.charAt(0).toUpperCase() + rawName.slice(1);
+      }
+
+      // Determine payer: detected from text, selected dropdown, or current user
+      let finalPayer = selectedPayer || currentUserName;
+      if (detectedPayer) {
+        const matched = members.find(
+          (m) => m.toLowerCase() === detectedPayer.toLowerCase()
+        );
+        if (matched) finalPayer = matched;
+      }
+
+      const newExp = {
+        id: 'exp-' + Date.now(),
+        user_id: session.user.id,
+        group_id: groupId,
+        name: expenseName,
+        paid_by: finalPayer,
+        amount: expenseAmt,
+        emoji: getEmoji(expenseName),
+        created_at: new Date().toISOString(),
+      };
+
+      try {
+        let allExp = [];
+        const stored = localStorage.getItem(`splitsmart.group_expenses.${groupId}`);
+        if (stored) allExp = JSON.parse(stored);
+        allExp.push(newExp);
+        localStorage.setItem(`splitsmart.group_expenses.${groupId}`, JSON.stringify(allExp));
+      } catch {}
+
+      supabase
+        .from('expenses')
+        .insert({
+          user_id: session.user.id,
+          group_id: groupId,
+          name: expenseName,
+          paid_by: finalPayer,
+          amount: expenseAmt,
+        })
+        .catch(() => {});
+
+      setExpenses((list) => [...list, newExp]);
+      setText('');
+    } catch (e) {
+      alert('Could not add expense: ' + e.message);
+    } finally {
+      setIsAdding(false);
+    }
+  };
+
+  const removeExpense = async (id) => {
+    setExpenses((list) => list.filter((e) => e.id !== id));
+    if (groupId) {
+      try {
+        const stored = localStorage.getItem(`splitsmart.group_expenses.${groupId}`);
+        if (stored) {
+          const filtered = JSON.parse(stored).filter((e) => e.id !== id);
+          localStorage.setItem(`splitsmart.group_expenses.${groupId}`, JSON.stringify(filtered));
+        }
+      } catch {}
+      supabase.from('expenses').delete().eq('id', id).catch(() => {});
+    }
+  };
+
   // Instant Dummy Authentication
   const handleAuth = (mode) => {
     setAuthMsg('');
@@ -318,14 +493,13 @@ export default function Home() {
       m.push({ group_id: newGroup.id, user_id: session.user.id });
       localStorage.setItem('splitsmart.multi.members', JSON.stringify(m));
 
-      // Initial members for newly created group
+      // Initial members
       localStorage.setItem(
         `splitsmart.members.${newGroup.id}`,
         JSON.stringify([currentUserName])
       );
     } catch {}
 
-    // Background sync to Supabase
     supabase
       .from('groups')
       .insert({ name: name.trim(), created_by: session.user.id })
@@ -342,7 +516,7 @@ export default function Home() {
     setGroupId(newGroup.id);
   };
 
-  // Join a group by code
+  // Join group
   const joinGroup = async () => {
     const code = prompt('Enter the 6-character group invite code:');
     if (!code || !code.trim()) return;
@@ -368,7 +542,6 @@ export default function Home() {
           localStorage.setItem('splitsmart.multi.members', JSON.stringify(m));
         }
 
-        // Add current user to group members if not already there
         let currentMembers = [];
         const gm = localStorage.getItem(`splitsmart.members.${foundGroup.id}`);
         if (gm) currentMembers = JSON.parse(gm);
@@ -393,104 +566,7 @@ export default function Home() {
     }
   };
 
-  // Add an expense
-  const addExpense = async () => {
-    const t = text.trim();
-    if (!t || !groupId || isAdding) return;
-
-    setIsAdding(true);
-    try {
-      let expenseName = '';
-      let expenseAmount = 0;
-      let detectedPayer = null;
-
-      // Try AI parsing via /api/split
-      try {
-        const res = await fetch('/api/split', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ sentence: t }),
-        });
-        const data = await res.json();
-        if (data && (data.description || data.amount)) {
-          expenseName = data.description;
-          expenseAmount = Number(data.amount || 0);
-          detectedPayer = data.paid_by;
-        }
-      } catch {}
-
-      // Fallback regex parsing
-      if (!expenseName) {
-        const amountMatch = t.match(/\d[\d,]*(\.\d+)?/);
-        expenseAmount = amountMatch ? Number(amountMatch[0].replace(/,/g, '')) : 0;
-        const rawName = t.replace(/\d[\d,]*(\.\d+)?/, '').replace(/\s+/g, ' ').trim() || 'Expense';
-        expenseName = rawName.charAt(0).toUpperCase() + rawName.slice(1);
-      }
-
-      // Determine payer: matched member, selected dropdown, or current user
-      let finalPayer = selectedPayer || currentUserName;
-      if (detectedPayer) {
-        const matched = members.find(
-          (m) => m.toLowerCase() === detectedPayer.toLowerCase()
-        );
-        if (matched) finalPayer = matched;
-      }
-
-      const newExp = {
-        id: 'exp-' + Date.now(),
-        user_id: session.user.id,
-        group_id: groupId,
-        name: expenseName,
-        paid_by: finalPayer,
-        amount: expenseAmount,
-        emoji: '🧾',
-        created_at: new Date().toISOString(),
-      };
-
-      try {
-        let allExp = [];
-        const stored = localStorage.getItem(`splitsmart.group_expenses.${groupId}`);
-        if (stored) allExp = JSON.parse(stored);
-        allExp.push(newExp);
-        localStorage.setItem(`splitsmart.group_expenses.${groupId}`, JSON.stringify(allExp));
-      } catch {}
-
-      // Background optional sync to Supabase
-      supabase
-        .from('expenses')
-        .insert({
-          user_id: session.user.id,
-          group_id: groupId,
-          name: expenseName,
-          paid_by: finalPayer,
-          amount: expenseAmount,
-        })
-        .catch(() => {});
-
-      setExpenses((list) => [...list, newExp]);
-      setText('');
-    } catch (e) {
-      alert('Could not add expense: ' + e.message);
-    } finally {
-      setIsAdding(false);
-    }
-  };
-
-  const removeExpense = async (id) => {
-    setExpenses((list) => list.filter((e) => e.id !== id));
-    if (groupId) {
-      try {
-        const stored = localStorage.getItem(`splitsmart.group_expenses.${groupId}`);
-        if (stored) {
-          const filtered = JSON.parse(stored).filter((e) => e.id !== id);
-          localStorage.setItem(`splitsmart.group_expenses.${groupId}`, JSON.stringify(filtered));
-        }
-      } catch {}
-      supabase.from('expenses').delete().eq('id', id).catch(() => {});
-    }
-  };
-
-  // Calculations for split & balances
+  // Calculations for equal split & balances
   const total = expenses.reduce((sum, e) => sum + Number(e.amount || 0), 0);
   const memberCount = Math.max(members.length, 1);
   const perPersonShare = total / memberCount;
@@ -642,7 +718,7 @@ export default function Home() {
           </div>
         )}
 
-        {/* PEOPLE SECTION: Manage Members */}
+        {/* PEOPLE SECTION: Manage Group Members */}
         {groupId && (
           <div style={styles.peopleBox}>
             <div style={styles.peopleHeader}>
@@ -710,49 +786,141 @@ export default function Home() {
           </div>
         )}
 
-        {/* Expenses List & Add Expense */}
+        {/* EXPENSE CREATION SECTION */}
         {groupId ? (
           <>
-            {/* Add Expense Row */}
-            <div style={{ marginBottom: 16 }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
-                <span style={{ fontSize: 13, fontWeight: 700, color: 'var(--ink)' }}>
-                  Paid by:
+            <div style={styles.addCard}>
+              <div style={styles.addCardHeader}>
+                <span style={{ fontWeight: 800, fontSize: 14, color: 'var(--ink)' }}>
+                  ➕ Add New Expense
                 </span>
-                <select
-                  style={styles.payerSelect}
-                  value={selectedPayer}
-                  onChange={(e) => setSelectedPayer(e.target.value)}
-                >
-                  {members.map((m) => (
-                    <option key={m} value={m}>
-                      {m === currentUserName ? `${m} (You)` : m}
-                    </option>
-                  ))}
-                </select>
-                <span style={{ fontSize: 12, color: 'var(--muted)', marginLeft: 'auto' }}>
-                  Splits equally ({members.length} people)
-                </span>
+                <div style={styles.tabToggle}>
+                  <button
+                    type="button"
+                    style={{
+                      ...styles.tabBtn,
+                      ...(addMode === 'form' ? styles.tabBtnActive : {}),
+                    }}
+                    onClick={() => setAddMode('form')}
+                  >
+                    📝 Form
+                  </button>
+                  <button
+                    type="button"
+                    style={{
+                      ...styles.tabBtn,
+                      ...(addMode === 'ai' ? styles.tabBtnActive : {}),
+                    }}
+                    onClick={() => setAddMode('ai')}
+                  >
+                    ⚡ AI Text
+                  </button>
+                </div>
               </div>
 
-              <div style={styles.addRow}>
-                <input
-                  style={styles.input}
-                  value={text}
-                  onChange={(e) => setText(e.target.value)}
-                  onKeyDown={(e) => e.key === 'Enter' && addExpense()}
-                  placeholder="Expense & amount (e.g. Dinner 1800 or Cab 400)…"
-                  disabled={isAdding}
-                />
-                <button
-                  style={styles.addBtn}
-                  onClick={addExpense}
-                  disabled={isAdding}
-                  aria-label="Add expense"
-                >
-                  {isAdding ? '…' : '+'}
-                </button>
-              </div>
+              {/* MODE 1: Standard Direct Form (Expense, Amount, Who Paid) */}
+              {addMode === 'form' ? (
+                <form onSubmit={handleManualAddExpense} style={styles.manualForm}>
+                  <div>
+                    <label style={styles.fieldLabel}>Expense Description</label>
+                    <input
+                      style={styles.fieldInput}
+                      type="text"
+                      placeholder="What was it for? (e.g. Dinner, Movie, Groceries)"
+                      value={expenseTitle}
+                      onChange={(e) => setExpenseTitle(e.target.value)}
+                      required
+                    />
+                  </div>
+
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+                    <div>
+                      <label style={styles.fieldLabel}>Amount (₹)</label>
+                      <input
+                        style={styles.fieldInput}
+                        type="number"
+                        min="1"
+                        step="any"
+                        placeholder="₹ Amount (e.g. 1800)"
+                        value={expenseAmount}
+                        onChange={(e) => setExpenseAmount(e.target.value)}
+                        required
+                      />
+                    </div>
+
+                    <div>
+                      <label style={styles.fieldLabel}>Who Paid for it?</label>
+                      <select
+                        style={styles.fieldSelect}
+                        value={selectedPayer}
+                        onChange={(e) => setSelectedPayer(e.target.value)}
+                      >
+                        {members.map((m) => (
+                          <option key={m} value={m}>
+                            {m === currentUserName ? `👤 ${m} (You)` : `👤 ${m}`}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+
+                  <div style={styles.splitNotice}>
+                    <span>
+                      👥 Splits equally among <b>{members.length}</b> people
+                    </span>
+                    {expenseAmount && !isNaN(parseFloat(expenseAmount)) && (
+                      <span style={{ color: 'var(--blue)', fontWeight: 700 }}>
+                        {inr(parseFloat(expenseAmount) / memberCount)} each
+                      </span>
+                    )}
+                  </div>
+
+                  <button type="submit" style={styles.submitExpenseBtn}>
+                    + Add Expense
+                  </button>
+                </form>
+              ) : (
+                /* MODE 2: AI / Natural Language Text */
+                <div style={styles.manualForm}>
+                  <div>
+                    <label style={styles.fieldLabel}>Quick Natural Language</label>
+                    <input
+                      style={styles.fieldInput}
+                      value={text}
+                      onChange={(e) => setText(e.target.value)}
+                      onKeyDown={(e) => e.key === 'Enter' && handleAiAddExpense()}
+                      placeholder="e.g. Aisha paid 1400 for groceries, or Dinner 1800…"
+                      disabled={isAdding}
+                    />
+                  </div>
+
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <span style={{ fontSize: 12.5, fontWeight: 700, color: 'var(--ink)' }}>
+                      Default Payer:
+                    </span>
+                    <select
+                      style={styles.payerSelectMini}
+                      value={selectedPayer}
+                      onChange={(e) => setSelectedPayer(e.target.value)}
+                    >
+                      {members.map((m) => (
+                        <option key={m} value={m}>
+                          {m === currentUserName ? `${m} (You)` : m}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <button
+                    type="button"
+                    style={styles.submitExpenseBtn}
+                    onClick={handleAiAddExpense}
+                    disabled={isAdding}
+                  >
+                    {isAdding ? 'Parsing with Gemini AI…' : '⚡ Parse & Add Expense'}
+                  </button>
+                </div>
+              )}
             </div>
 
             {/* Expenses List */}
@@ -765,7 +933,12 @@ export default function Home() {
                   <div style={styles.itemEmoji}>{e.emoji || '🧾'}</div>
                   <div style={styles.itemMain}>
                     <div style={styles.itemName}>{e.name}</div>
-                    <div style={styles.itemPaid}>paid by <b>{e.paid_by}</b></div>
+                    <div style={styles.itemPaid}>
+                      paid by <b style={{ color: 'var(--ink)' }}>{e.paid_by}</b>
+                      <span style={{ color: 'var(--muted)', marginLeft: 6 }}>
+                        ({inr(Number(e.amount || 0) / memberCount)} / person)
+                      </span>
+                    </div>
                   </div>
                   <div style={styles.itemAmount}>{inr(e.amount)}</div>
                   <button
@@ -1030,26 +1203,109 @@ const styles = {
     lineHeight: 1,
   },
 
-  payerSelect: {
+  /* Add Expense Card */
+  addCard: {
+    background: '#ffffff',
+    border: '1.5px solid #e2e8f0',
+    borderRadius: 18,
+    padding: '16px',
+    marginBottom: 18,
+    boxShadow: '0 4px 16px -4px rgba(15, 23, 42, 0.06)',
+  },
+  addCardHeader: {
+    display: 'flex',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 14,
+  },
+  tabToggle: {
+    display: 'flex',
+    background: '#f1f5f9',
+    borderRadius: 10,
+    padding: 3,
+    gap: 3,
+  },
+  tabBtn: {
+    border: 'none',
+    background: 'transparent',
+    padding: '4px 10px',
+    borderRadius: 7,
+    fontSize: 12,
+    fontWeight: 700,
+    color: 'var(--muted)',
+    cursor: 'pointer',
+  },
+  tabBtnActive: {
+    background: '#ffffff',
+    color: 'var(--blue)',
+    boxShadow: '0 1px 3px rgba(0,0,0,0.08)',
+  },
+  manualForm: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 12,
+  },
+  fieldLabel: {
+    display: 'block',
+    fontSize: 12.5,
+    fontWeight: 700,
+    color: 'var(--ink)',
+    marginBottom: 5,
+  },
+  fieldInput: {
+    width: '100%',
+    border: '1px solid var(--line)',
+    borderRadius: 12,
+    padding: '10px 12px',
+    fontSize: 14.5,
+    outline: 'none',
+    background: '#f8fafc',
+    boxSizing: 'border-box',
+    color: 'var(--ink)',
+  },
+  fieldSelect: {
+    width: '100%',
+    border: '1px solid var(--line)',
+    borderRadius: 12,
+    padding: '10px 12px',
+    fontSize: 14,
+    fontWeight: 700,
+    outline: 'none',
+    background: '#f8fafc',
+    boxSizing: 'border-box',
+    color: 'var(--ink)',
+  },
+  splitNotice: {
+    display: 'flex',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    fontSize: 12,
+    color: 'var(--muted)',
+    padding: '2px 2px',
+  },
+  submitExpenseBtn: {
+    width: '100%',
+    border: 'none',
+    borderRadius: 12,
+    padding: '12px',
+    color: '#fff',
+    fontSize: 14.5,
+    fontWeight: 800,
+    background: 'linear-gradient(135deg, var(--blue), var(--cyan))',
+    boxShadow: '0 8px 18px -6px rgba(28,95,212,.5)',
+    cursor: 'pointer',
+  },
+  payerSelectMini: {
     border: '1px solid var(--line)',
     borderRadius: 8,
-    padding: '5px 8px',
-    fontSize: 13,
+    padding: '4px 8px',
+    fontSize: 12.5,
     fontWeight: 700,
     background: '#f8fafc',
     color: 'var(--ink)',
     outline: 'none',
   },
-  addRow: { display: 'flex', gap: 10 },
-  input: {
-    flex: 1,
-    border: '1px solid var(--line)',
-    borderRadius: 14,
-    padding: '13px 15px',
-    fontSize: 15,
-    outline: 'none',
-    background: '#f7f9fc',
-  },
+
   input2: {
     width: '100%',
     border: '1px solid var(--line)',
@@ -1083,17 +1339,7 @@ const styles = {
     background: '#fff',
     cursor: 'pointer',
   },
-  addBtn: {
-    flex: 'none',
-    width: 48,
-    borderRadius: 14,
-    border: 'none',
-    color: '#fff',
-    fontSize: 24,
-    fontWeight: 700,
-    background: 'linear-gradient(135deg, var(--blue), var(--cyan))',
-    cursor: 'pointer',
-  },
+
   list: { display: 'flex', flexDirection: 'column', gap: 10, minHeight: 60 },
   empty: {
     color: 'var(--muted)',
