@@ -16,6 +16,8 @@ export default function Home() {
   const [selectedPayer, setSelectedPayer] = useState('');
   const [showBalances, setShowBalances] = useState(true);
   const [expenses, setExpenses] = useState([]);
+  const [shareFeedback, setShareFeedback] = useState('');
+  const [pendingInvite, setPendingInvite] = useState(null);
 
   // Form states for adding expenses
   const [addMode, setAddMode] = useState('form'); // 'form' or 'ai'
@@ -29,7 +31,7 @@ export default function Home() {
   const [password, setPassword] = useState('');
   const [authMsg, setAuthMsg] = useState('');
 
-  // Restore saved session on mount
+  // 1. Restore saved session on mount
   useEffect(() => {
     try {
       const stored = localStorage.getItem('splitsmart.dummy.session');
@@ -60,7 +62,133 @@ export default function Home() {
     ? session.user.name.charAt(0).toUpperCase() + session.user.name.slice(1)
     : 'Shiv';
 
-  // Load groups for active user
+  // 2. Read URL parameters for invite links (?join=CODE&name=TITLE&data=PAYLOAD)
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    try {
+      const params = new URLSearchParams(window.location.search);
+      const code = params.get('join');
+      const name = params.get('name');
+      const dataStr = params.get('data');
+
+      if (code) {
+        setPendingInvite({
+          code: code.trim().toUpperCase(),
+          name: name ? decodeURIComponent(name) : 'Shared Group',
+          dataStr: dataStr || '',
+        });
+      }
+    } catch {}
+  }, []);
+
+  // 3. Process pending invite once user has a session
+  useEffect(() => {
+    if (!session || !pendingInvite) return;
+
+    const executeInvite = async () => {
+      const { code, name, dataStr } = pendingInvite;
+      let joinedGroupId = null;
+
+      // Try Supabase first
+      try {
+        const { data: dbGroup, error } = await supabase
+          .from('groups')
+          .select('*')
+          .eq('join_code', code)
+          .single();
+
+        if (dbGroup) {
+          joinedGroupId = dbGroup.id;
+
+          // Add group locally
+          let g = [];
+          try {
+            const gs = localStorage.getItem('splitsmart.multi.groups');
+            if (gs) g = JSON.parse(gs);
+          } catch {}
+          if (!g.some((item) => item.id === dbGroup.id)) {
+            g.push(dbGroup);
+            localStorage.setItem('splitsmart.multi.groups', JSON.stringify(g));
+          }
+
+          // Add current user to group members
+          let currentMembers = Array.isArray(dbGroup.members) ? [...dbGroup.members] : [];
+          if (!currentMembers.includes(currentUserName)) {
+            currentMembers.push(currentUserName);
+          }
+          localStorage.setItem(`splitsmart.members.${dbGroup.id}`, JSON.stringify(currentMembers));
+
+          // Fetch group expenses from Supabase
+          const { data: dbExp } = await supabase
+            .from('expenses')
+            .select('*')
+            .eq('group_id', dbGroup.id);
+          if (dbExp && dbExp.length) {
+            localStorage.setItem(`splitsmart.group_expenses.${dbGroup.id}`, JSON.stringify(dbExp));
+          }
+        }
+      } catch {}
+
+      // Fallback: unpack data from invite link if Supabase table is not configured
+      if (!joinedGroupId) {
+        let decodedExpenses = [];
+        let decodedMembers = [currentUserName];
+        let groupTitle = name || 'Shared Group';
+
+        if (dataStr) {
+          try {
+            const parsed = JSON.parse(decodeURIComponent(escape(atob(decodeURIComponent(dataStr)))));
+            if (parsed.name) groupTitle = parsed.name;
+            if (Array.isArray(parsed.members)) {
+              decodedMembers = Array.from(new Set([...parsed.members, currentUserName]));
+            }
+            if (Array.isArray(parsed.expenses)) {
+              decodedExpenses = parsed.expenses;
+            }
+          } catch {}
+        }
+
+        const newSharedGroup = {
+          id: 'grp-' + code,
+          name: groupTitle,
+          join_code: code,
+          created_by: 'friend',
+          created_at: new Date().toISOString(),
+        };
+
+        let g = [];
+        try {
+          const gs = localStorage.getItem('splitsmart.multi.groups');
+          if (gs) g = JSON.parse(gs);
+        } catch {}
+        if (!g.some((item) => item.join_code === code)) {
+          g.push(newSharedGroup);
+          localStorage.setItem('splitsmart.multi.groups', JSON.stringify(g));
+        }
+
+        localStorage.setItem(`splitsmart.members.${newSharedGroup.id}`, JSON.stringify(decodedMembers));
+        if (decodedExpenses.length) {
+          localStorage.setItem(`splitsmart.group_expenses.${newSharedGroup.id}`, JSON.stringify(decodedExpenses));
+        }
+
+        joinedGroupId = newSharedGroup.id;
+      }
+
+      setPendingInvite(null);
+      if (typeof window !== 'undefined') {
+        window.history.replaceState({}, '', window.location.pathname);
+      }
+
+      await loadGroups();
+      if (joinedGroupId) setGroupId(joinedGroupId);
+      setShareFeedback(`🎉 Joined group "${name || code}" successfully!`);
+      setTimeout(() => setShareFeedback(''), 4000);
+    };
+
+    executeInvite();
+  }, [session, pendingInvite]);
+
+  // 4. Load groups for active user
   const loadGroups = async () => {
     if (!session) return;
     let allGroups = [];
@@ -77,8 +205,20 @@ export default function Home() {
       .map((m) => m.group_id);
 
     let userGroups = allGroups.filter(
-      (g) => g.created_by === session.user.id || memberGroupIds.includes(g.id)
+      (g) => g.created_by === session.user.id || memberGroupIds.includes(g.id) || g.created_by === 'friend'
     );
+
+    // Optional background check with Supabase
+    try {
+      const { data } = await supabase.from('groups').select('*').order('created_at');
+      if (data && data.length) {
+        data.forEach((dg) => {
+          if (!userGroups.some((ug) => ug.id === dg.id || ug.join_code === dg.join_code)) {
+            userGroups.push(dg);
+          }
+        });
+      }
+    } catch {}
 
     // Seed default starter group if none exists
     if (userGroups.length === 0) {
@@ -97,14 +237,9 @@ export default function Home() {
         localStorage.setItem('splitsmart.multi.groups', JSON.stringify(allGroups));
         localStorage.setItem('splitsmart.multi.members', JSON.stringify(myMemberships));
 
-        // Starter members
         const starterMembers = [currentUserName, 'Aisha', 'Raj'];
-        localStorage.setItem(
-          `splitsmart.members.${defaultGroup.id}`,
-          JSON.stringify(starterMembers)
-        );
+        localStorage.setItem(`splitsmart.members.${defaultGroup.id}`, JSON.stringify(starterMembers));
 
-        // Starter expenses
         const seedExpenses = [
           {
             id: 'seed-1',
@@ -127,24 +262,9 @@ export default function Home() {
             created_at: new Date().toISOString(),
           },
         ];
-        localStorage.setItem(
-          `splitsmart.group_expenses.${defaultGroup.id}`,
-          JSON.stringify(seedExpenses)
-        );
+        localStorage.setItem(`splitsmart.group_expenses.${defaultGroup.id}`, JSON.stringify(seedExpenses));
       } catch {}
     }
-
-    // Optional background check with Supabase
-    try {
-      const { data } = await supabase.from('groups').select('*').order('created_at');
-      if (data && data.length) {
-        data.forEach((dg) => {
-          if (!userGroups.some((ug) => ug.id === dg.id)) {
-            userGroups.push(dg);
-          }
-        });
-      }
-    } catch {}
 
     setGroups(userGroups);
     if (userGroups.length) {
@@ -162,7 +282,7 @@ export default function Home() {
     }
   }, [session]);
 
-  // Load members & expenses whenever selected group changes
+  // 5. Load members & expenses whenever selected group changes
   useEffect(() => {
     if (!session || !groupId) {
       setExpenses([]);
@@ -206,6 +326,9 @@ export default function Home() {
       .then(({ data }) => {
         if (data && data.length) {
           setExpenses(data);
+          try {
+            localStorage.setItem(`splitsmart.group_expenses.${groupId}`, JSON.stringify(data));
+          } catch {}
         }
       })
       .catch(() => {});
@@ -229,6 +352,13 @@ export default function Home() {
       localStorage.setItem(`splitsmart.members.${groupId}`, JSON.stringify(updated));
     } catch {}
 
+    // Update Supabase if group exists
+    supabase
+      .from('groups')
+      .update({ members: updated })
+      .eq('id', groupId)
+      .catch(() => {});
+
     setNewPersonName('');
     setShowAddPerson(false);
   };
@@ -247,6 +377,12 @@ export default function Home() {
     try {
       localStorage.setItem(`splitsmart.members.${groupId}`, JSON.stringify(updated));
     } catch {}
+
+    supabase
+      .from('groups')
+      .update({ members: updated })
+      .eq('id', groupId)
+      .catch(() => {});
   };
 
   // Helper to pick emoji based on expense title
@@ -263,7 +399,7 @@ export default function Home() {
     return '🧾';
   };
 
-  // Function 1: Manual Form to add Expense, Amount, and Who Paid
+  // Manual Form to add Expense, Amount, and Who Paid
   const handleManualAddExpense = (e) => {
     e.preventDefault();
     const name = expenseTitle.trim();
@@ -304,15 +440,16 @@ export default function Home() {
       localStorage.setItem(`splitsmart.group_expenses.${groupId}`, JSON.stringify(allExp));
     } catch {}
 
-    // Background optional sync to Supabase
+    // Background sync to Supabase
     supabase
       .from('expenses')
       .insert({
-        user_id: session.user.id,
+        id: newExp.id,
         group_id: groupId,
         name,
         paid_by: payer,
         amount: amt,
+        emoji,
       })
       .catch(() => {});
 
@@ -321,7 +458,7 @@ export default function Home() {
     setExpenseAmount('');
   };
 
-  // Function 2: Quick AI / Natural text parsing
+  // Quick AI / Natural text parsing
   const handleAiAddExpense = async () => {
     const t = text.trim();
     if (!t || !groupId || isAdding) return;
@@ -332,7 +469,6 @@ export default function Home() {
       let expenseAmt = 0;
       let detectedPayer = null;
 
-      // Try AI parsing via /api/split
       try {
         const res = await fetch('/api/split', {
           method: 'POST',
@@ -347,7 +483,6 @@ export default function Home() {
         }
       } catch {}
 
-      // Fallback regex parsing
       if (!expenseName) {
         const amountMatch = t.match(/\d[\d,]*(\.\d+)?/);
         expenseAmt = amountMatch ? Number(amountMatch[0].replace(/,/g, '')) : 0;
@@ -355,7 +490,6 @@ export default function Home() {
         expenseName = rawName.charAt(0).toUpperCase() + rawName.slice(1);
       }
 
-      // Determine payer: detected from text, selected dropdown, or current user
       let finalPayer = selectedPayer || currentUserName;
       if (detectedPayer) {
         const matched = members.find(
@@ -386,11 +520,12 @@ export default function Home() {
       supabase
         .from('expenses')
         .insert({
-          user_id: session.user.id,
+          id: newExp.id,
           group_id: groupId,
           name: expenseName,
           paid_by: finalPayer,
           amount: expenseAmt,
+          emoji: newExp.emoji,
         })
         .catch(() => {});
 
@@ -476,6 +611,7 @@ export default function Home() {
       id: 'grp-' + Date.now(),
       name: name.trim(),
       join_code: code,
+      members: [currentUserName],
       created_by: session.user.id,
       created_at: new Date().toISOString(),
     };
@@ -493,22 +629,21 @@ export default function Home() {
       m.push({ group_id: newGroup.id, user_id: session.user.id });
       localStorage.setItem('splitsmart.multi.members', JSON.stringify(m));
 
-      // Initial members
       localStorage.setItem(
         `splitsmart.members.${newGroup.id}`,
         JSON.stringify([currentUserName])
       );
     } catch {}
 
+    // Cloud insert into Supabase
     supabase
       .from('groups')
-      .insert({ name: name.trim(), created_by: session.user.id })
-      .select()
-      .single()
-      .then(async ({ data: sg }) => {
-        if (sg) {
-          await supabase.from('group_members').insert({ group_id: sg.id, user_id: session.user.id });
-        }
+      .insert({
+        id: newGroup.id,
+        name: newGroup.name,
+        join_code: newGroup.join_code,
+        members: [currentUserName],
+        created_by: session.user.id,
       })
       .catch(() => {});
 
@@ -516,13 +651,55 @@ export default function Home() {
     setGroupId(newGroup.id);
   };
 
-  // Join group
+  // Join a group by code or link
   const joinGroup = async () => {
     const code = prompt('Enter the 6-character group invite code:');
     if (!code || !code.trim()) return;
 
     const cleanCode = code.trim().toUpperCase();
 
+    // 1. Check Supabase cloud database
+    try {
+      const { data: dbGroup, error } = await supabase
+        .from('groups')
+        .select('*')
+        .eq('join_code', cleanCode)
+        .single();
+
+      if (dbGroup) {
+        let g = [];
+        try {
+          const gs = localStorage.getItem('splitsmart.multi.groups');
+          if (gs) g = JSON.parse(gs);
+        } catch {}
+        if (!g.some((item) => item.id === dbGroup.id)) {
+          g.push(dbGroup);
+          localStorage.setItem('splitsmart.multi.groups', JSON.stringify(g));
+        }
+
+        let currentMembers = Array.isArray(dbGroup.members) ? [...dbGroup.members] : [];
+        if (!currentMembers.includes(currentUserName)) {
+          currentMembers.push(currentUserName);
+        }
+        localStorage.setItem(`splitsmart.members.${dbGroup.id}`, JSON.stringify(currentMembers));
+
+        const { data: dbExp } = await supabase
+          .from('expenses')
+          .select('*')
+          .eq('group_id', dbGroup.id);
+        if (dbExp && dbExp.length) {
+          localStorage.setItem(`splitsmart.group_expenses.${dbGroup.id}`, JSON.stringify(dbExp));
+        }
+
+        await loadGroups();
+        setGroupId(dbGroup.id);
+        setShareFeedback(`🎉 Successfully joined "${dbGroup.name}"!`);
+        setTimeout(() => setShareFeedback(''), 4000);
+        return;
+      }
+    } catch {}
+
+    // 2. Check local groups
     let foundGroup = null;
     try {
       const gs = localStorage.getItem('splitsmart.multi.groups');
@@ -556,13 +733,58 @@ export default function Home() {
       return;
     }
 
+    alert(
+      `No group found with code "${cleanCode}".\n\nTip: Ask your friend to tap "Share Group" or "Copy Invite Link" on their device and send you the direct link!`
+    );
+  };
+
+  // Generate share link that works on ANY device
+  const getShareLink = () => {
+    if (!currentGroup) return '';
+    const origin = typeof window !== 'undefined' ? window.location.origin : 'https://splitsmart-starter-swart.vercel.app';
+    const payload = {
+      name: currentGroup.name,
+      members,
+      expenses,
+    };
+    let dataParam = '';
     try {
-      const { data, error } = await supabase.rpc('join_group', { code: cleanCode });
-      if (error) throw error;
-      await loadGroups();
-      setGroupId(data);
-    } catch {
-      alert('No group found with code: ' + cleanCode + '. Please check and try again.');
+      dataParam = '&data=' + encodeURIComponent(btoa(unescape(encodeURIComponent(JSON.stringify(payload)))));
+    } catch {}
+
+    return `${origin}/?join=${currentGroup.join_code}&name=${encodeURIComponent(currentGroup.name)}${dataParam}`;
+  };
+
+  // Share or copy invite link
+  const handleShareGroup = async () => {
+    if (!currentGroup) return;
+    const link = getShareLink();
+
+    if (navigator.share) {
+      try {
+        await navigator.share({
+          title: `Join ${currentGroup.name} on Shiv's SplitSmart`,
+          text: `Hey! Join our expense group "${currentGroup.name}" on Shiv's SplitSmart (Code: ${currentGroup.join_code}):`,
+          url: link,
+        });
+        setShareFeedback('✅ Invite shared successfully!');
+        setTimeout(() => setShareFeedback(''), 4000);
+        return;
+      } catch {}
+    }
+
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard
+        .writeText(link)
+        .then(() => {
+          setShareFeedback('✅ Invite link copied! Send it to your friends to give them access.');
+          setTimeout(() => setShareFeedback(''), 4000);
+        })
+        .catch(() => {
+          prompt('Copy this invite link and share it with your friends:', link);
+        });
+    } else {
+      prompt('Copy this invite link and share it with your friends:', link);
     }
   };
 
@@ -611,9 +833,17 @@ export default function Home() {
             <span style={styles.badge}>Live</span>
           </div>
 
-          <p style={{ color: '#6b7280', fontSize: 14, marginBottom: 16, lineHeight: 1.5 }}>
-            Sign in to split group expenses and manage balances with your friends.
-          </p>
+          {pendingInvite ? (
+            <div style={styles.inviteNotice}>
+              🎉 You've been invited to join <b>"{pendingInvite.name}"</b> (Code: {pendingInvite.code})!
+              <br />
+              Sign in below to get instant access.
+            </div>
+          ) : (
+            <p style={{ color: '#6b7280', fontSize: 14, marginBottom: 16, lineHeight: 1.5 }}>
+              Sign in to split group expenses and manage balances with your friends.
+            </p>
+          )}
 
           <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
             <div>
@@ -690,6 +920,13 @@ export default function Home() {
           </div>
         </div>
 
+        {/* Global Feedback Banner */}
+        {shareFeedback && (
+          <div style={styles.feedbackBanner}>
+            {shareFeedback}
+          </div>
+        )}
+
         {/* Group Selector & Creation */}
         <div style={styles.groupBar}>
           <select
@@ -712,9 +949,19 @@ export default function Home() {
           </button>
         </div>
 
+        {/* Invite Bar: Code & Share Link */}
         {currentGroup && (
-          <div style={styles.codeLine}>
-            Invite code: <b style={{ letterSpacing: '1px', color: 'var(--blue)' }}>{currentGroup.join_code}</b>
+          <div style={styles.inviteBar}>
+            <div style={styles.codeText}>
+              Code: <b style={{ letterSpacing: '1px', color: 'var(--blue)', fontSize: 14 }}>{currentGroup.join_code}</b>
+            </div>
+            <button
+              style={styles.shareBtn}
+              onClick={handleShareGroup}
+              title="Share invite link with friends so they can join"
+            >
+              🔗 Share Invite Link
+            </button>
           </div>
         )}
 
@@ -1081,6 +1328,27 @@ const styles = {
     color: 'var(--muted)',
     cursor: 'pointer',
   },
+  inviteNotice: {
+    background: '#dbeafe',
+    border: '1px solid #93c5fd',
+    borderRadius: 12,
+    padding: '10px 14px',
+    color: '#1e40af',
+    fontSize: 13,
+    lineHeight: 1.5,
+    marginBottom: 16,
+  },
+  feedbackBanner: {
+    background: '#d1fae5',
+    border: '1px solid #6ee7b7',
+    borderRadius: 12,
+    padding: '10px 14px',
+    color: '#065f46',
+    fontSize: 13,
+    fontWeight: 600,
+    marginBottom: 14,
+    textAlign: 'center',
+  },
   groupBar: { display: 'flex', gap: 8, marginBottom: 8 },
   select: {
     flex: 1,
@@ -1104,7 +1372,33 @@ const styles = {
     color: 'var(--blue)',
     cursor: 'pointer',
   },
-  codeLine: { fontSize: 13, color: 'var(--muted)', marginBottom: 14 },
+
+  /* Invite Bar */
+  inviteBar: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    background: '#f8fafc',
+    border: '1px dashed #cbd5e1',
+    borderRadius: 14,
+    padding: '8px 12px',
+    marginBottom: 14,
+  },
+  codeText: {
+    fontSize: 13,
+    color: 'var(--muted)',
+  },
+  shareBtn: {
+    border: 'none',
+    background: 'linear-gradient(135deg, var(--blue), var(--cyan))',
+    color: '#fff',
+    padding: '6px 14px',
+    borderRadius: 10,
+    fontSize: 12.5,
+    fontWeight: 700,
+    cursor: 'pointer',
+    boxShadow: '0 2px 8px rgba(28,95,212,.25)',
+  },
 
   /* People Section */
   peopleBox: {
