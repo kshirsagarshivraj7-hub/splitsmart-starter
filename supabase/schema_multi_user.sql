@@ -34,3 +34,4 @@ create policy "allow_all_groups" on groups for all using (true) with check (true
 
 drop policy if exists "allow_all_expenses" on expenses;
 create policy "allow_all_expenses" on expenses for all using (true) with check (true);
+
