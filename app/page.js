@@ -16,6 +16,10 @@ export default function Home() {
   const [selectedPayer, setSelectedPayer] = useState('');
   const [showBalances, setShowBalances] = useState(true);
   const [expenses, setExpenses] = useState([]);
+  const [settlements, setSettlements] = useState([]);
+  const [paymentModal, setPaymentModal] = useState(null); // { from, to, amount }
+  const [copiedUpi, setCopiedUpi] = useState(false);
+  const [qrImgError, setQrImgError] = useState(false);
   const [shareFeedback, setShareFeedback] = useState('');
   const [pendingInvite, setPendingInvite] = useState(null);
 
@@ -129,6 +133,7 @@ export default function Home() {
       // Fallback: decode group from invite link or code
       if (!joinedGroupId) {
         let decodedExpenses = [];
+        let decodedSettlements = [];
         let decodedMembers = [currentUserName, 'Friend'];
         let groupTitle = name || 'Shared Group';
 
@@ -141,6 +146,9 @@ export default function Home() {
             }
             if (Array.isArray(parsed.expenses)) {
               decodedExpenses = parsed.expenses;
+            }
+            if (Array.isArray(parsed.settlements)) {
+              decodedSettlements = parsed.settlements;
             }
           } catch {}
         }
@@ -166,6 +174,9 @@ export default function Home() {
         localStorage.setItem(`splitsmart.members.${newSharedGroup.id}`, JSON.stringify(decodedMembers));
         if (decodedExpenses.length) {
           localStorage.setItem(`splitsmart.group_expenses.${newSharedGroup.id}`, JSON.stringify(decodedExpenses));
+        }
+        if (decodedSettlements.length) {
+          localStorage.setItem(`splitsmart.settlements.${newSharedGroup.id}`, JSON.stringify(decodedSettlements));
         }
 
         joinedGroupId = newSharedGroup.id;
@@ -313,6 +324,14 @@ export default function Home() {
       if (stored) groupExp = JSON.parse(stored);
     } catch {}
     setExpenses(groupExp);
+
+    // Load group settlements
+    let groupSet = [];
+    try {
+      const sStored = localStorage.getItem(`splitsmart.settlements.${groupId}`);
+      if (sStored) groupSet = JSON.parse(sStored);
+    } catch {}
+    setSettlements(groupSet);
 
     // Optional background fetch from Supabase
     supabase
@@ -592,6 +611,8 @@ export default function Home() {
     setGroupId('');
     setExpenses([]);
     setMembers([]);
+    setSettlements([]);
+    setPaymentModal(null);
   };
 
   // Create a new group
@@ -658,6 +679,7 @@ export default function Home() {
     let groupNameFromInput = null;
     let membersFromInput = null;
     let expensesFromInput = null;
+    let settlementsFromInput = null;
 
     // If user pasted a full link into the join input
     if (cleanCode.includes('?join=') || cleanCode.includes('&join=')) {
@@ -674,6 +696,7 @@ export default function Home() {
             if (parsed.name) groupNameFromInput = parsed.name;
             if (parsed.members) membersFromInput = parsed.members;
             if (parsed.expenses) expensesFromInput = parsed.expenses;
+            if (parsed.settlements) settlementsFromInput = parsed.settlements;
           } catch {}
         }
       } catch {}
@@ -801,6 +824,9 @@ export default function Home() {
     if (initialExpenses.length) {
       localStorage.setItem(`splitsmart.group_expenses.${joinedGroup.id}`, JSON.stringify(initialExpenses));
     }
+    if (settlementsFromInput && settlementsFromInput.length) {
+      localStorage.setItem(`splitsmart.settlements.${joinedGroup.id}`, JSON.stringify(settlementsFromInput));
+    }
 
     // Sync to Supabase so other peers find it
     supabase
@@ -828,6 +854,7 @@ export default function Home() {
       name: currentGroup.name,
       members,
       expenses,
+      settlements,
     };
     let dataParam = '';
     try {
@@ -888,18 +915,121 @@ export default function Home() {
   const memberCount = Math.max(members.length, 1);
   const perPersonShare = total / memberCount;
 
-  // Calculate balances per member
+  // Calculate balances per member taking expenses and settlements into account
   const balances = members.map((member) => {
     const paid = expenses
       .filter((e) => (e.paid_by || '').toLowerCase() === member.toLowerCase())
       .reduce((sum, e) => sum + Number(e.amount || 0), 0);
-    const net = paid - perPersonShare;
+
+    const settledPaid = settlements
+      .filter((s) => (s.from || '').toLowerCase() === member.toLowerCase())
+      .reduce((sum, s) => sum + Number(s.amount || 0), 0);
+
+    const settledReceived = settlements
+      .filter((s) => (s.to || '').toLowerCase() === member.toLowerCase())
+      .reduce((sum, s) => sum + Number(s.amount || 0), 0);
+
+    const net = paid + settledPaid - settledReceived - perPersonShare;
     return {
       member,
       paid,
+      settledPaid,
+      settledReceived,
       net,
     };
   });
+
+  const creditors = balances.filter((b) => b.net > 0.5).sort((a, b) => b.net - a.net);
+  const debtors = balances.filter((b) => b.net < -0.5).sort((a, b) => a.net - b.net);
+
+  const openPayModal = (fromMember, suggestedAmount) => {
+    const defaultTo =
+      creditors.find((c) => c.member.toLowerCase() !== (fromMember || '').toLowerCase())?.member ||
+      members.find((m) => m.toLowerCase() !== (fromMember || '').toLowerCase()) ||
+      '';
+    setQrImgError(false);
+    setPaymentModal({
+      from: fromMember || members[0] || '',
+      to: defaultTo,
+      amount: suggestedAmount !== undefined && suggestedAmount > 0 ? String(suggestedAmount) : '',
+    });
+  };
+
+  const openDefaultPaymentModal = () => {
+    const defaultFrom = debtors[0]?.member || currentUserName;
+    const defaultTo =
+      creditors.find((c) => c.member.toLowerCase() !== (defaultFrom || '').toLowerCase())?.member ||
+      members.find((m) => m.toLowerCase() !== (defaultFrom || '').toLowerCase()) ||
+      '';
+    const suggestedAmount = debtors[0] ? Math.round(Math.abs(debtors[0].net)) : '';
+    setQrImgError(false);
+    setPaymentModal({
+      from: defaultFrom,
+      to: defaultTo,
+      amount: suggestedAmount ? String(suggestedAmount) : '',
+    });
+  };
+
+  const handleConfirmSettlement = (e) => {
+    e?.preventDefault();
+    if (!paymentModal || !groupId) return;
+    const { from, to, amount } = paymentModal;
+    const numAmount = parseFloat(amount);
+
+    if (!from || !to) {
+      alert('Please specify both the payer and recipient.');
+      return;
+    }
+    if (from.toLowerCase() === to.toLowerCase()) {
+      alert('Payer and recipient cannot be the same person.');
+      return;
+    }
+    if (isNaN(numAmount) || numAmount <= 0) {
+      alert('Please enter a valid amount greater than 0.');
+      return;
+    }
+
+    const newSet = {
+      id: 'set-' + Date.now(),
+      group_id: groupId,
+      from,
+      to,
+      amount: numAmount,
+      created_at: new Date().toISOString(),
+    };
+
+    const updated = [...settlements, newSet];
+    setSettlements(updated);
+
+    try {
+      localStorage.setItem(`splitsmart.settlements.${groupId}`, JSON.stringify(updated));
+    } catch {}
+
+    supabase
+      .from('settlements')
+      .insert({
+        id: newSet.id,
+        group_id: groupId,
+        from_member: from,
+        to_member: to,
+        amount: numAmount,
+      })
+      .catch(() => {});
+
+    setPaymentModal(null);
+    setShareFeedback(`🎉 Recorded: ${from} paid ${to} ${inr(numAmount)}! Balances updated.`);
+    setTimeout(() => setShareFeedback(''), 5000);
+  };
+
+  const removeSettlement = (id) => {
+    if (!confirm('Are you sure you want to delete this payment record?')) return;
+    const updated = settlements.filter((s) => s.id !== id);
+    setSettlements(updated);
+    try {
+      localStorage.setItem(`splitsmart.settlements.${groupId}`, JSON.stringify(updated));
+    } catch {}
+    supabase.from('settlements').delete().eq('id', id).catch(() => {});
+  };
 
   const currentGroup = groups.find((g) => g.id === groupId);
 
@@ -1322,16 +1452,26 @@ export default function Home() {
 
             {/* Balances & Settlement Section */}
             <div style={styles.balancesSection}>
-              <div
-                style={styles.balancesHeader}
-                onClick={() => setShowBalances(!showBalances)}
-              >
-                <span style={{ fontWeight: 800, fontSize: 14 }}>
-                  📊 Settlement & Balances ({members.length})
-                </span>
-                <span style={{ fontSize: 12, color: 'var(--blue)', fontWeight: 700 }}>
-                  {showBalances ? 'Hide ▲' : 'Show ▼'}
-                </span>
+              <div style={styles.balancesHeader}>
+                <div
+                  style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer', flex: 1 }}
+                  onClick={() => setShowBalances(!showBalances)}
+                >
+                  <span style={{ fontWeight: 800, fontSize: 14 }}>
+                    📊 Settlement & Balances ({members.length})
+                  </span>
+                  <span style={{ fontSize: 12, color: 'var(--blue)', fontWeight: 700 }}>
+                    {showBalances ? 'Hide ▲' : 'Show ▼'}
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  style={styles.settleUpHeaderBtn}
+                  onClick={openDefaultPaymentModal}
+                  title="Open payment QR code and settle up"
+                >
+                  💳 Settle Up
+                </button>
               </div>
 
               {showBalances && (
@@ -1347,6 +1487,16 @@ export default function Home() {
                           </div>
                           <div style={{ fontSize: 12, color: 'var(--muted)' }}>
                             Paid {inr(b.paid)}
+                            {b.settledPaid > 0 && (
+                              <span style={{ color: '#047857', marginLeft: 4 }}>
+                                + {inr(b.settledPaid)} returned
+                              </span>
+                            )}
+                            {b.settledReceived > 0 && (
+                              <span style={{ color: '#b45309', marginLeft: 4 }}>
+                                - {inr(b.settledReceived)} received
+                              </span>
+                            )}
                           </div>
                         </div>
 
@@ -1357,17 +1507,61 @@ export default function Home() {
                             </span>
                           )}
                           {isNegative && (
-                            <span style={styles.owesBadge}>
-                              owes {inr(Math.abs(b.net))}
-                            </span>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 6, justifyContent: 'flex-end' }}>
+                              <span style={styles.owesBadge}>
+                                owes {inr(Math.abs(b.net))}
+                              </span>
+                              <button
+                                type="button"
+                                style={styles.payBtn}
+                                onClick={() => openPayModal(b.member, Math.round(Math.abs(b.net)))}
+                                title={`Pay ${b.member}'s debt with QR code`}
+                              >
+                                💳 Pay
+                              </button>
+                            </div>
                           )}
                           {!isPositive && !isNegative && (
-                            <span style={styles.settledBadge}>Settled</span>
+                            <span style={styles.settledBadge}>✓ Settled</span>
                           )}
                         </div>
                       </div>
                     );
                   })}
+
+                  {/* Recorded Settlements List */}
+                  {settlements.length > 0 && (
+                    <div style={styles.settlementsBox}>
+                      <div style={styles.settlementsHeader}>
+                        <span style={{ fontSize: 12.5, fontWeight: 800, color: 'var(--ink)' }}>
+                          💸 Recorded Settlements ({settlements.length})
+                        </span>
+                      </div>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                        {settlements.map((s) => (
+                          <div key={s.id} style={styles.settlementItem}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, flex: 1, minWidth: 0 }}>
+                              <span style={{ fontSize: 14 }}>✅</span>
+                              <span style={{ color: 'var(--ink)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                <b>{s.from}</b> paid <b>{s.to}</b>
+                              </span>
+                              <span style={{ color: '#047857', fontWeight: 800, marginLeft: 'auto', paddingRight: 6 }}>
+                                {inr(s.amount)}
+                              </span>
+                            </div>
+                            <button
+                              type="button"
+                              style={styles.removeSettlementBtn}
+                              onClick={() => removeSettlement(s.id)}
+                              title="Delete this payment record"
+                            >
+                              ×
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                 </div>
               )}
             </div>
@@ -1378,6 +1572,236 @@ export default function Home() {
           </div>
         )}
       </div>
+
+      {/* PAYMENT MODAL WITH DUMMY PAYMENT QR CODE */}
+      {paymentModal && (
+        <div style={styles.modalOverlay} onClick={() => setPaymentModal(null)}>
+          <div style={styles.modalCard} onClick={(e) => e.stopPropagation()}>
+            {/* Modal Header */}
+            <div style={styles.modalHeader}>
+              <div>
+                <div style={styles.modalTitle}>💳 Return / Settle Payment</div>
+                <div style={styles.modalSub}>Scan dummy QR or mark as paid to settle up</div>
+              </div>
+              <button
+                type="button"
+                style={styles.modalClose}
+                onClick={() => setPaymentModal(null)}
+                aria-label="Close"
+              >
+                ✕
+              </button>
+            </div>
+
+            {/* Payer and Recipient Selectors */}
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 12 }}>
+              <div>
+                <label style={styles.fieldLabel}>Who is Paying?</label>
+                <select
+                  style={styles.fieldSelect}
+                  value={paymentModal.from}
+                  onChange={(e) => {
+                    const newFrom = e.target.value;
+                    setPaymentModal((cur) => ({
+                      ...cur,
+                      from: newFrom,
+                      to: cur.to === newFrom ? members.find((m) => m !== newFrom) || '' : cur.to,
+                    }));
+                  }}
+                >
+                  {members.map((m) => (
+                    <option key={m} value={m}>
+                      {m === currentUserName ? `👤 ${m} (You)` : `👤 ${m}`}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label style={styles.fieldLabel}>Paying To (Recipient)</label>
+                <select
+                  style={styles.fieldSelect}
+                  value={paymentModal.to}
+                  onChange={(e) => setPaymentModal((cur) => ({ ...cur, to: e.target.value }))}
+                >
+                  {members
+                    .filter((m) => m.toLowerCase() !== (paymentModal.from || '').toLowerCase())
+                    .map((m) => (
+                      <option key={m} value={m}>
+                        {m === currentUserName ? `👤 ${m} (You)` : `👤 ${m}`}
+                      </option>
+                    ))}
+                </select>
+              </div>
+            </div>
+
+            {/* Amount Input */}
+            <div style={{ marginBottom: 14 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 5 }}>
+                <label style={styles.fieldLabel}>Amount to Pay (₹)</label>
+                {(() => {
+                  const debtor = debtors.find((d) => d.member.toLowerCase() === (paymentModal.from || '').toLowerCase());
+                  if (debtor) {
+                    const fullOwed = Math.round(Math.abs(debtor.net));
+                    return (
+                      <button
+                        type="button"
+                        style={styles.quickAmtBtn}
+                        onClick={() => setPaymentModal((cur) => ({ ...cur, amount: String(fullOwed) }))}
+                      >
+                        Pay Full {inr(fullOwed)}
+                      </button>
+                    );
+                  }
+                  return null;
+                })()}
+              </div>
+              <input
+                style={styles.fieldInput}
+                type="number"
+                min="1"
+                step="any"
+                placeholder="₹ Enter amount to pay"
+                value={paymentModal.amount}
+                onChange={(e) => setPaymentModal((cur) => ({ ...cur, amount: e.target.value }))}
+                required
+              />
+            </div>
+
+            {/* DUMMY PAYMENT QR CODE CARD */}
+            {(() => {
+              const recipientName = paymentModal.to || 'Friend';
+              const cleanUpiUser = recipientName.toLowerCase().replace(/[^a-z0-9]/g, '') || 'splitsmart';
+              const recipientUpi = `${cleanUpiUser}@okhdfcbank`;
+              const payAmt = parseFloat(paymentModal.amount) || 0;
+              const upiUri = `upi://pay?pa=${recipientUpi}&pn=${encodeURIComponent(recipientName)}&am=${payAmt}&cu=INR&tn=SplitSmart%20Settlement`;
+              const qrUrl = `https://api.qrserver.com/v1/create-qr-code/?size=220x220&margin=8&data=${encodeURIComponent(upiUri)}`;
+
+              return (
+                <div style={styles.qrCard}>
+                  {/* Top UPI Info */}
+                  <div style={styles.upiInfoRow}>
+                    <div>
+                      <span style={{ fontSize: 11, color: 'var(--muted)', fontWeight: 700, textTransform: 'uppercase' }}>
+                        Recipient UPI ID
+                      </span>
+                      <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--ink)' }}>
+                        {recipientUpi}
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      style={styles.copyUpiBtn}
+                      onClick={() => {
+                        if (navigator.clipboard?.writeText) {
+                          navigator.clipboard.writeText(recipientUpi).then(() => {
+                            setCopiedUpi(true);
+                            setTimeout(() => setCopiedUpi(false), 2000);
+                          });
+                        }
+                      }}
+                    >
+                      {copiedUpi ? '✓ Copied' : '📋 Copy UPI'}
+                    </button>
+                  </div>
+
+                  {/* QR Code Container */}
+                  <div style={styles.qrBox}>
+                    {!qrImgError ? (
+                      <img
+                        src={qrUrl}
+                        alt={`Payment QR for ${recipientName}`}
+                        style={styles.qrImg}
+                        onError={() => setQrImgError(true)}
+                      />
+                    ) : (
+                      <svg
+                        width="180"
+                        height="180"
+                        viewBox="0 0 180 180"
+                        style={{ borderRadius: 8, display: 'block' }}
+                      >
+                        <rect width="180" height="180" fill="#ffffff" />
+                        <rect x="15" y="15" width="40" height="40" rx="4" fill="#0f172a" />
+                        <rect x="23" y="23" width="24" height="24" fill="#ffffff" />
+                        <rect x="29" y="29" width="12" height="12" rx="2" fill="#1c5fd4" />
+                        <rect x="125" y="15" width="40" height="40" rx="4" fill="#0f172a" />
+                        <rect x="133" y="23" width="24" height="24" fill="#ffffff" />
+                        <rect x="139" y="29" width="12" height="12" rx="2" fill="#1c5fd4" />
+                        <rect x="15" y="125" width="40" height="40" rx="4" fill="#0f172a" />
+                        <rect x="23" y="133" width="24" height="24" fill="#ffffff" />
+                        <rect x="29" y="139" width="12" height="12" rx="2" fill="#1c5fd4" />
+                        <rect x="65" y="20" width="8" height="8" fill="#0f172a" />
+                        <rect x="80" y="20" width="16" height="8" fill="#0f172a" />
+                        <rect x="105" y="20" width="8" height="8" fill="#0f172a" />
+                        <rect x="65" y="35" width="14" height="8" fill="#0f172a" />
+                        <rect x="90" y="35" width="14" height="8" fill="#0f172a" />
+                        <rect x="20" y="65" width="12" height="8" fill="#0f172a" />
+                        <rect x="40" y="65" width="16" height="8" fill="#0f172a" />
+                        <rect x="125" y="65" width="10" height="8" fill="#0f172a" />
+                        <rect x="145" y="65" width="18" height="8" fill="#0f172a" />
+                        <rect x="20" y="80" width="24" height="8" fill="#0f172a" />
+                        <rect x="125" y="80" width="36" height="8" fill="#0f172a" />
+                        <rect x="20" y="95" width="10" height="8" fill="#0f172a" />
+                        <rect x="40" y="95" width="16" height="8" fill="#0f172a" />
+                        <rect x="130" y="95" width="20" height="8" fill="#0f172a" />
+                        <rect x="65" y="125" width="18" height="8" fill="#0f172a" />
+                        <rect x="95" y="125" width="12" height="8" fill="#0f172a" />
+                        <rect x="125" y="125" width="10" height="8" fill="#0f172a" />
+                        <rect x="145" y="125" width="16" height="8" fill="#0f172a" />
+                        <rect x="65" y="145" width="10" height="8" fill="#0f172a" />
+                        <rect x="85" y="145" width="24" height="8" fill="#0f172a" />
+                        <rect x="120" y="145" width="14" height="8" fill="#0f172a" />
+                        <circle cx="90" cy="90" r="18" fill="#1c5fd4" />
+                        <text x="90" y="95" textAnchor="middle" fill="#ffffff" fontSize="13" fontWeight="bold">₹</text>
+                      </svg>
+                    )}
+                  </div>
+
+                  {/* QR Details */}
+                  <div style={{ textAlign: 'center', marginTop: 10 }}>
+                    <div style={{ fontSize: 20, fontWeight: 800, color: '#047857' }}>
+                      {inr(payAmt)}
+                    </div>
+                    <div style={{ fontSize: 12.5, color: 'var(--muted)', marginTop: 2 }}>
+                      Scan dummy QR to pay <b>{recipientName}</b>
+                    </div>
+                  </div>
+
+                  {/* UPI Brand badges */}
+                  <div style={styles.upiBadges}>
+                    <span style={styles.upiBadge}>Google Pay</span>
+                    <span style={styles.upiBadge}>PhonePe</span>
+                    <span style={styles.upiBadge}>Paytm</span>
+                    <span style={styles.upiBadge}>BHIM</span>
+                  </div>
+                  <div style={{ textAlign: 'center', marginTop: 6, fontSize: 11, color: 'var(--muted)' }}>
+                    Dummy Payment QR Code for demonstration
+                  </div>
+                </div>
+              );
+            })()}
+
+            {/* Modal Actions */}
+            <div style={{ display: 'flex', gap: 10, marginTop: 16 }}>
+              <button
+                type="button"
+                style={styles.cancelModalBtn}
+                onClick={() => setPaymentModal(null)}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                style={styles.confirmSettleBtn}
+                onClick={handleConfirmSettlement}
+              >
+                ✅ Mark as Paid & Settle
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </main>
   );
 }
@@ -1885,5 +2309,212 @@ const styles = {
     background: '#f3f4f6',
     padding: '4px 10px',
     borderRadius: 999,
+  },
+
+  /* Pay & Settle Buttons */
+  payBtn: {
+    border: 'none',
+    background: 'linear-gradient(135deg, #059669, #10b981)',
+    color: '#fff',
+    borderRadius: 999,
+    padding: '4px 10px',
+    fontSize: 11.5,
+    fontWeight: 800,
+    cursor: 'pointer',
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: 4,
+    boxShadow: '0 2px 6px rgba(16, 185, 129, 0.25)',
+  },
+  settleUpHeaderBtn: {
+    border: 'none',
+    background: 'linear-gradient(135deg, #059669, #10b981)',
+    color: '#fff',
+    borderRadius: 8,
+    padding: '4px 10px',
+    fontSize: 12,
+    fontWeight: 800,
+    cursor: 'pointer',
+    boxShadow: '0 2px 6px rgba(16, 185, 129, 0.2)',
+  },
+
+  /* Settlements History */
+  settlementsBox: {
+    marginTop: 12,
+    paddingTop: 12,
+    borderTop: '1px solid var(--line)',
+  },
+  settlementsHeader: {
+    display: 'flex',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 8,
+  },
+  settlementItem: {
+    display: 'flex',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    background: '#ffffff',
+    border: '1px solid var(--line)',
+    borderRadius: 10,
+    padding: '6px 10px',
+  },
+  removeSettlementBtn: {
+    border: 'none',
+    background: 'transparent',
+    color: 'var(--muted)',
+    fontSize: 16,
+    cursor: 'pointer',
+    padding: '0 4px',
+    lineHeight: 1,
+  },
+
+  /* Payment Modal */
+  modalOverlay: {
+    position: 'fixed',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    background: 'rgba(15, 23, 42, 0.65)',
+    backdropFilter: 'blur(5px)',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 9999,
+    padding: 16,
+  },
+  modalCard: {
+    width: '100%',
+    maxWidth: 420,
+    background: '#ffffff',
+    borderRadius: 22,
+    padding: 20,
+    boxShadow: '0 25px 50px -12px rgba(0, 0, 0, 0.35)',
+    border: '1px solid #e2e8f0',
+    maxHeight: '90vh',
+    overflowY: 'auto',
+  },
+  modalHeader: {
+    display: 'flex',
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',
+    marginBottom: 14,
+  },
+  modalTitle: {
+    fontSize: 16,
+    fontWeight: 800,
+    color: 'var(--ink)',
+  },
+  modalSub: {
+    fontSize: 12,
+    color: 'var(--muted)',
+    marginTop: 2,
+  },
+  modalClose: {
+    border: 'none',
+    background: '#f1f5f9',
+    color: 'var(--muted)',
+    width: 28,
+    height: 28,
+    borderRadius: 8,
+    fontSize: 14,
+    fontWeight: 700,
+    cursor: 'pointer',
+    display: 'grid',
+    placeItems: 'center',
+  },
+  quickAmtBtn: {
+    border: 'none',
+    background: '#eff6ff',
+    color: 'var(--blue)',
+    borderRadius: 6,
+    padding: '2px 8px',
+    fontSize: 11.5,
+    fontWeight: 700,
+    cursor: 'pointer',
+  },
+  qrCard: {
+    background: '#f8fafc',
+    border: '1.5px solid #e2e8f0',
+    borderRadius: 16,
+    padding: '14px',
+  },
+  upiInfoRow: {
+    display: 'flex',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    background: '#ffffff',
+    border: '1px solid var(--line)',
+    borderRadius: 10,
+    padding: '6px 10px',
+    marginBottom: 12,
+  },
+  copyUpiBtn: {
+    border: 'none',
+    background: '#eff6ff',
+    color: 'var(--blue)',
+    borderRadius: 8,
+    padding: '4px 8px',
+    fontSize: 11.5,
+    fontWeight: 700,
+    cursor: 'pointer',
+  },
+  qrBox: {
+    display: 'flex',
+    justifyContent: 'center',
+    alignItems: 'center',
+    background: '#ffffff',
+    border: '1px solid #e2e8f0',
+    borderRadius: 14,
+    padding: 12,
+    width: 'fit-content',
+    margin: '0 auto',
+    boxShadow: '0 4px 12px rgba(0,0,0,0.05)',
+  },
+  qrImg: {
+    width: 180,
+    height: 180,
+    display: 'block',
+    borderRadius: 8,
+  },
+  upiBadges: {
+    display: 'flex',
+    justifyContent: 'center',
+    gap: 6,
+    flexWrap: 'wrap',
+    marginTop: 10,
+  },
+  upiBadge: {
+    fontSize: 10.5,
+    fontWeight: 700,
+    background: '#ffffff',
+    border: '1px solid #e2e8f0',
+    color: 'var(--ink)',
+    padding: '2px 8px',
+    borderRadius: 999,
+  },
+  cancelModalBtn: {
+    flex: 1,
+    border: '1px solid var(--line)',
+    background: '#fff',
+    color: 'var(--ink)',
+    borderRadius: 12,
+    padding: '10px',
+    fontSize: 13.5,
+    fontWeight: 700,
+    cursor: 'pointer',
+  },
+  confirmSettleBtn: {
+    flex: 2,
+    border: 'none',
+    background: 'linear-gradient(135deg, #059669, #10b981)',
+    color: '#fff',
+    borderRadius: 12,
+    padding: '10px',
+    fontSize: 13.5,
+    fontWeight: 800,
+    cursor: 'pointer',
+    boxShadow: '0 4px 12px rgba(16, 185, 129, 0.3)',
   },
 };
