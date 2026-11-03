@@ -942,6 +942,17 @@ export default function Home() {
   const creditors = balances.filter((b) => b.net > 0.5).sort((a, b) => b.net - a.net);
   const debtors = balances.filter((b) => b.net < -0.5).sort((a, b) => a.net - b.net);
 
+  const DEFAULT_PHONEPE_UPI = '9503116072-5@ybl';
+
+  const getMemberUpi = (name) => {
+    if (!name) return DEFAULT_PHONEPE_UPI;
+    try {
+      const stored = localStorage.getItem(`splitsmart.upi.${name.toLowerCase()}`);
+      if (stored) return stored;
+    } catch {}
+    return DEFAULT_PHONEPE_UPI;
+  };
+
   const openPayModal = (fromMember, suggestedAmount) => {
     const defaultTo =
       creditors.find((c) => c.member.toLowerCase() !== (fromMember || '').toLowerCase())?.member ||
@@ -952,6 +963,7 @@ export default function Home() {
       from: fromMember || members[0] || '',
       to: defaultTo,
       amount: suggestedAmount !== undefined && suggestedAmount > 0 ? String(suggestedAmount) : '',
+      upi: getMemberUpi(defaultTo),
     });
   };
 
@@ -967,6 +979,7 @@ export default function Home() {
       from: defaultFrom,
       to: defaultTo,
       amount: suggestedAmount ? String(suggestedAmount) : '',
+      upi: getMemberUpi(defaultTo),
     });
   };
 
@@ -1580,8 +1593,8 @@ export default function Home() {
             {/* Modal Header */}
             <div style={styles.modalHeader}>
               <div>
-                <div style={styles.modalTitle}>💳 Return / Settle Payment</div>
-                <div style={styles.modalSub}>Scan dummy QR or mark as paid to settle up</div>
+                <div style={styles.modalTitle}>💳 Pay via PhonePe / UPI</div>
+                <div style={styles.modalSub}>Pay directly with PhonePe or scan real QR code</div>
               </div>
               <button
                 type="button"
@@ -1602,10 +1615,12 @@ export default function Home() {
                   value={paymentModal.from}
                   onChange={(e) => {
                     const newFrom = e.target.value;
+                    const newTo = paymentModal.to === newFrom ? members.find((m) => m !== newFrom) || '' : paymentModal.to;
                     setPaymentModal((cur) => ({
                       ...cur,
                       from: newFrom,
-                      to: cur.to === newFrom ? members.find((m) => m !== newFrom) || '' : cur.to,
+                      to: newTo,
+                      upi: getMemberUpi(newTo),
                     }));
                   }}
                 >
@@ -1622,7 +1637,14 @@ export default function Home() {
                 <select
                   style={styles.fieldSelect}
                   value={paymentModal.to}
-                  onChange={(e) => setPaymentModal((cur) => ({ ...cur, to: e.target.value }))}
+                  onChange={(e) => {
+                    const newTo = e.target.value;
+                    setPaymentModal((cur) => ({
+                      ...cur,
+                      to: newTo,
+                      upi: getMemberUpi(newTo),
+                    }));
+                  }}
                 >
                   {members
                     .filter((m) => m.toLowerCase() !== (paymentModal.from || '').toLowerCase())
@@ -1633,6 +1655,43 @@ export default function Home() {
                     ))}
                 </select>
               </div>
+            </div>
+
+            {/* Recipient PhonePe UPI ID Field with Copy */}
+            <div style={{ marginBottom: 12 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 5 }}>
+                <label style={styles.fieldLabel}>PhonePe UPI ID</label>
+                <button
+                  type="button"
+                  style={styles.copyUpiBtn}
+                  onClick={() => {
+                    const idToCopy = paymentModal.upi || DEFAULT_PHONEPE_UPI;
+                    if (navigator.clipboard?.writeText) {
+                      navigator.clipboard.writeText(idToCopy).then(() => {
+                        setCopiedUpi(true);
+                        setTimeout(() => setCopiedUpi(false), 2000);
+                      });
+                    }
+                  }}
+                >
+                  {copiedUpi ? '✓ Copied' : '📋 Copy UPI ID'}
+                </button>
+              </div>
+              <input
+                style={styles.fieldInput}
+                type="text"
+                value={paymentModal.upi || DEFAULT_PHONEPE_UPI}
+                onChange={(e) => {
+                  const val = e.target.value.trim();
+                  setPaymentModal((cur) => ({ ...cur, upi: val }));
+                  try {
+                    if (paymentModal.to) {
+                      localStorage.setItem(`splitsmart.upi.${paymentModal.to.toLowerCase()}`, val);
+                    }
+                  } catch {}
+                }}
+                placeholder="9503116072-5@ybl"
+              />
             </div>
 
             {/* Amount Input */}
@@ -1668,41 +1727,46 @@ export default function Home() {
               />
             </div>
 
-            {/* DUMMY PAYMENT QR CODE CARD */}
+            {/* REAL PHONEPE PAYMENT & QR CODE CARD */}
             {(() => {
               const recipientName = paymentModal.to || 'Friend';
-              const cleanUpiUser = recipientName.toLowerCase().replace(/[^a-z0-9]/g, '') || 'splitsmart';
-              const recipientUpi = `${cleanUpiUser}@okhdfcbank`;
+              const recipientUpi = paymentModal.upi || DEFAULT_PHONEPE_UPI;
               const payAmt = parseFloat(paymentModal.amount) || 0;
-              const upiUri = `upi://pay?pa=${recipientUpi}&pn=${encodeURIComponent(recipientName)}&am=${payAmt}&cu=INR&tn=SplitSmart%20Settlement`;
-              const qrUrl = `https://api.qrserver.com/v1/create-qr-code/?size=220x220&margin=8&data=${encodeURIComponent(upiUri)}`;
+              const upiUri = 'upi://pay?pa=' + encodeURIComponent(recipientUpi) + '&pn=' + encodeURIComponent(recipientName) + '&am=' + encodeURIComponent(payAmt) + '&cu=INR&tn=' + encodeURIComponent('SplitSmart Settlement');
+              const qrUrl = 'https://api.qrserver.com/v1/create-qr-code/?size=240x240&margin=8&data=' + encodeURIComponent(upiUri);
 
               return (
                 <div style={styles.qrCard}>
-                  {/* Top UPI Info */}
-                  <div style={styles.upiInfoRow}>
-                    <div>
-                      <span style={{ fontSize: 11, color: 'var(--muted)', fontWeight: 700, textTransform: 'uppercase' }}>
-                        Recipient UPI ID
-                      </span>
-                      <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--ink)' }}>
-                        {recipientUpi}
+                  {/* PhonePe Header */}
+                  <div style={styles.phonepeHeader}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                      <span style={styles.phonepeIcon}>पे</span>
+                      <div>
+                        <div style={{ fontWeight: 800, fontSize: 13, color: '#5f259f' }}>
+                          PhonePe UPI
+                        </div>
+                        <div style={{ fontSize: 11.5, color: '#6b7280', fontWeight: 600 }}>
+                          {recipientUpi}
+                        </div>
                       </div>
                     </div>
-                    <button
-                      type="button"
-                      style={styles.copyUpiBtn}
-                      onClick={() => {
-                        if (navigator.clipboard?.writeText) {
-                          navigator.clipboard.writeText(recipientUpi).then(() => {
-                            setCopiedUpi(true);
-                            setTimeout(() => setCopiedUpi(false), 2000);
-                          });
-                        }
-                      }}
-                    >
-                      {copiedUpi ? '✓ Copied' : '📋 Copy UPI'}
-                    </button>
+                    <span style={styles.verifiedBadge}>✓ Verified UPI</span>
+                  </div>
+
+                  {/* DIRECT PAY BUTTON (Tap to open PhonePe directly) */}
+                  <a
+                    href={upiUri}
+                    style={styles.directPayBtn}
+                    title="Open PhonePe or default UPI app directly"
+                  >
+                    <span style={{ fontSize: 17 }}>⚡</span>
+                    <span>Pay Directly via PhonePe App</span>
+                    {payAmt > 0 && <span style={{ opacity: 0.9 }}>({inr(payAmt)})</span>}
+                  </a>
+
+                  {/* QR Divider */}
+                  <div style={styles.qrOrDivider}>
+                    <span>or scan QR code with any UPI app</span>
                   </div>
 
                   {/* QR Code Container */}
@@ -1710,73 +1774,65 @@ export default function Home() {
                     {!qrImgError ? (
                       <img
                         src={qrUrl}
-                        alt={`Payment QR for ${recipientName}`}
+                        alt={'PhonePe QR for ' + recipientUpi}
                         style={styles.qrImg}
                         onError={() => setQrImgError(true)}
                       />
                     ) : (
                       <svg
-                        width="180"
-                        height="180"
-                        viewBox="0 0 180 180"
+                        width="190"
+                        height="190"
+                        viewBox="0 0 190 190"
                         style={{ borderRadius: 8, display: 'block' }}
                       >
-                        <rect width="180" height="180" fill="#ffffff" />
-                        <rect x="15" y="15" width="40" height="40" rx="4" fill="#0f172a" />
-                        <rect x="23" y="23" width="24" height="24" fill="#ffffff" />
-                        <rect x="29" y="29" width="12" height="12" rx="2" fill="#1c5fd4" />
-                        <rect x="125" y="15" width="40" height="40" rx="4" fill="#0f172a" />
-                        <rect x="133" y="23" width="24" height="24" fill="#ffffff" />
-                        <rect x="139" y="29" width="12" height="12" rx="2" fill="#1c5fd4" />
-                        <rect x="15" y="125" width="40" height="40" rx="4" fill="#0f172a" />
-                        <rect x="23" y="133" width="24" height="24" fill="#ffffff" />
-                        <rect x="29" y="139" width="12" height="12" rx="2" fill="#1c5fd4" />
-                        <rect x="65" y="20" width="8" height="8" fill="#0f172a" />
-                        <rect x="80" y="20" width="16" height="8" fill="#0f172a" />
-                        <rect x="105" y="20" width="8" height="8" fill="#0f172a" />
-                        <rect x="65" y="35" width="14" height="8" fill="#0f172a" />
-                        <rect x="90" y="35" width="14" height="8" fill="#0f172a" />
-                        <rect x="20" y="65" width="12" height="8" fill="#0f172a" />
-                        <rect x="40" y="65" width="16" height="8" fill="#0f172a" />
-                        <rect x="125" y="65" width="10" height="8" fill="#0f172a" />
-                        <rect x="145" y="65" width="18" height="8" fill="#0f172a" />
-                        <rect x="20" y="80" width="24" height="8" fill="#0f172a" />
-                        <rect x="125" y="80" width="36" height="8" fill="#0f172a" />
-                        <rect x="20" y="95" width="10" height="8" fill="#0f172a" />
-                        <rect x="40" y="95" width="16" height="8" fill="#0f172a" />
-                        <rect x="130" y="95" width="20" height="8" fill="#0f172a" />
-                        <rect x="65" y="125" width="18" height="8" fill="#0f172a" />
-                        <rect x="95" y="125" width="12" height="8" fill="#0f172a" />
-                        <rect x="125" y="125" width="10" height="8" fill="#0f172a" />
-                        <rect x="145" y="125" width="16" height="8" fill="#0f172a" />
-                        <rect x="65" y="145" width="10" height="8" fill="#0f172a" />
-                        <rect x="85" y="145" width="24" height="8" fill="#0f172a" />
-                        <rect x="120" y="145" width="14" height="8" fill="#0f172a" />
-                        <circle cx="90" cy="90" r="18" fill="#1c5fd4" />
-                        <text x="90" y="95" textAnchor="middle" fill="#ffffff" fontSize="13" fontWeight="bold">₹</text>
+                        <rect width="190" height="190" fill="#ffffff" />
+                        <rect x="16" y="16" width="42" height="42" rx="4" fill="#5f259f" />
+                        <rect x="24" y="24" width="26" height="26" fill="#ffffff" />
+                        <rect x="30" y="30" width="14" height="14" rx="2" fill="#5f259f" />
+                        <rect x="132" y="16" width="42" height="42" rx="4" fill="#5f259f" />
+                        <rect x="140" y="24" width="26" height="26" fill="#ffffff" />
+                        <rect x="146" y="30" width="14" height="14" rx="2" fill="#5f259f" />
+                        <rect x="16" y="132" width="42" height="42" rx="4" fill="#5f259f" />
+                        <rect x="24" y="140" width="26" height="26" fill="#ffffff" />
+                        <rect x="30" y="146" width="14" height="14" rx="2" fill="#5f259f" />
+                        <rect x="70" y="22" width="8" height="8" fill="#5f259f" />
+                        <rect x="85" y="22" width="16" height="8" fill="#5f259f" />
+                        <rect x="110" y="22" width="8" height="8" fill="#5f259f" />
+                        <rect x="70" y="38" width="14" height="8" fill="#5f259f" />
+                        <rect x="95" y="38" width="14" height="8" fill="#5f259f" />
+                        <rect x="22" y="70" width="12" height="8" fill="#5f259f" />
+                        <rect x="42" y="70" width="16" height="8" fill="#5f259f" />
+                        <rect x="132" y="70" width="10" height="8" fill="#5f259f" />
+                        <rect x="152" y="70" width="18" height="8" fill="#5f259f" />
+                        <rect x="22" y="86" width="24" height="8" fill="#5f259f" />
+                        <rect x="132" y="86" width="36" height="8" fill="#5f259f" />
+                        <rect x="70" y="132" width="18" height="8" fill="#5f259f" />
+                        <rect x="100" y="132" width="12" height="8" fill="#5f259f" />
+                        <circle cx="95" cy="95" r="20" fill="#5f259f" />
+                        <text x="95" y="101" textAnchor="middle" fill="#ffffff" fontSize="15" fontWeight="bold">पे</text>
                       </svg>
                     )}
                   </div>
 
                   {/* QR Details */}
                   <div style={{ textAlign: 'center', marginTop: 10 }}>
-                    <div style={{ fontSize: 20, fontWeight: 800, color: '#047857' }}>
+                    <div style={{ fontSize: 22, fontWeight: 800, color: '#5f259f' }}>
                       {inr(payAmt)}
                     </div>
-                    <div style={{ fontSize: 12.5, color: 'var(--muted)', marginTop: 2 }}>
-                      Scan dummy QR to pay <b>{recipientName}</b>
+                    <div style={{ fontSize: 13, color: 'var(--ink)', fontWeight: 700, marginTop: 2 }}>
+                      Pay to <span style={{ color: '#5f259f' }}>{recipientUpi}</span>
+                    </div>
+                    <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 2 }}>
+                      Scan with PhonePe, Google Pay, Paytm, or BHIM
                     </div>
                   </div>
 
                   {/* UPI Brand badges */}
                   <div style={styles.upiBadges}>
+                    <span style={{ ...styles.upiBadge, borderColor: '#5f259f', color: '#5f259f', fontWeight: 800 }}>💜 PhonePe</span>
                     <span style={styles.upiBadge}>Google Pay</span>
-                    <span style={styles.upiBadge}>PhonePe</span>
                     <span style={styles.upiBadge}>Paytm</span>
-                    <span style={styles.upiBadge}>BHIM</span>
-                  </div>
-                  <div style={{ textAlign: 'center', marginTop: 6, fontSize: 11, color: 'var(--muted)' }}>
-                    Dummy Payment QR Code for demonstration
+                    <span style={styles.upiBadge}>BHIM UPI</span>
                   </div>
                 </div>
               );
@@ -2516,5 +2572,62 @@ const styles = {
     fontWeight: 800,
     cursor: 'pointer',
     boxShadow: '0 4px 12px rgba(16, 185, 129, 0.3)',
+  },
+
+  /* PhonePe & Direct Pay Styles */
+  directPayBtn: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    width: '100%',
+    boxSizing: 'border-box',
+    textDecoration: 'none',
+    background: 'linear-gradient(135deg, #5f259f, #7c3aed)',
+    color: '#ffffff',
+    borderRadius: 14,
+    padding: '13px 16px',
+    fontSize: 14.5,
+    fontWeight: 800,
+    boxShadow: '0 6px 18px -4px rgba(95, 37, 159, 0.45)',
+    marginBottom: 12,
+    cursor: 'pointer',
+    textAlign: 'center',
+  },
+  phonepeHeader: {
+    display: 'flex',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    background: '#f5f3ff',
+    border: '1px solid #ddd6fe',
+    borderRadius: 12,
+    padding: '8px 12px',
+    marginBottom: 12,
+  },
+  phonepeIcon: {
+    width: 24,
+    height: 24,
+    borderRadius: 6,
+    background: '#5f259f',
+    color: '#fff',
+    display: 'grid',
+    placeItems: 'center',
+    fontSize: 13,
+    fontWeight: 800,
+  },
+  verifiedBadge: {
+    fontSize: 11,
+    fontWeight: 700,
+    color: '#059669',
+    background: '#d1fae5',
+    padding: '2px 8px',
+    borderRadius: 999,
+  },
+  qrOrDivider: {
+    textAlign: 'center',
+    fontSize: 12,
+    color: 'var(--muted)',
+    fontWeight: 600,
+    marginBottom: 12,
   },
 };
